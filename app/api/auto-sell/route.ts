@@ -268,21 +268,29 @@ async function executeAutoSell(
   try {
     const privateKeys = wallets.map((w) => bs58.encode(w.secretKey))
 
-    const mockRequest = {
-      json: async () => ({
-        mint,
-        privateKeys,
-        percentage,
-        slippageBps,
-        limitWallets: Math.min(wallets.length, 10),
-      }),
-    } as NextRequest
+    const requestBody = {
+      mint,
+      privateKeys,
+      percentage,
+      slippageBps,
+      limitWallets: Math.min(wallets.length, 10),
+    }
 
     console.log(`🔗 Calling sell handler for ${mint} to sell ${percentage}% of tokens`)
 
     const response = (await Promise.race([
       (async () => {
         const { POST: sellHandler } = await import("../sell/route")
+
+        // Create a proper mock NextRequest
+        const mockRequest = new Request("http://localhost/api/sell", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(requestBody),
+        }) as NextRequest
+
         return sellHandler(mockRequest)
       })(),
       new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout")), 20000)),
@@ -300,6 +308,46 @@ async function executeAutoSell(
     console.error(`❌ Auto-sell failed:`, error)
     return { error: error.message }
   }
+}
+
+async function handleNetflowMode(mint: string, privateKeys: string[], percentage: number, slippageBps: number) {
+  const wallets: Keypair[] = []
+  for (const pk of privateKeys) {
+    try {
+      const secretKey = bs58.decode(pk)
+      const keypair = Keypair.fromSecretKey(secretKey)
+      wallets.push(keypair)
+    } catch (error) {
+      console.error(`Invalid private key: ${pk}`)
+      continue
+    }
+  }
+
+  if (wallets.length === 0) {
+    return Response.json({ error: "No valid wallets provided" }, { status: 400 })
+  }
+
+  console.log(`🚀 Starting auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
+
+  // Start the monitoring process without awaiting
+  startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+    .then((result) => {
+      console.log("Auto-sell completed:", result)
+    })
+    .catch((error) => {
+      console.error("Auto-sell failed:", error)
+    })
+
+  // Return immediate response to prevent UI hanging
+  return Response.json({
+    success: true,
+    message: `Auto-sell monitoring started for ${mint} with ${wallets.length} wallets`,
+    status: "monitoring_started",
+    mint,
+    wallets: wallets.length,
+    percentage,
+    slippageBps,
+  })
 }
 
 interface VolumeData {
@@ -454,43 +502,7 @@ export async function POST(request: NextRequest) {
 
     // Fallback to original volume monitoring if no trades provided
     if (!trades && mint && privateKeys) {
-      const wallets: Keypair[] = []
-      for (const pk of privateKeys) {
-        try {
-          const secretKey = bs58.decode(pk)
-          const keypair = Keypair.fromSecretKey(secretKey)
-          wallets.push(keypair)
-        } catch (error) {
-          console.error(`Invalid private key: ${pk}`)
-          continue
-        }
-      }
-
-      if (wallets.length === 0) {
-        return Response.json({ error: "No valid wallets provided" }, { status: 400 })
-      }
-
-      console.log(`🚀 Starting auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
-
-      // Start the monitoring process without awaiting
-      startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
-        .then((result) => {
-          console.log("Auto-sell completed:", result)
-        })
-        .catch((error) => {
-          console.error("Auto-sell failed:", error)
-        })
-
-      // Return immediate response to prevent UI hanging
-      return Response.json({
-        success: true,
-        message: `Auto-sell monitoring started for ${mint} with ${wallets.length} wallets`,
-        status: "monitoring_started",
-        mint,
-        wallets: wallets.length,
-        percentage,
-        slippageBps,
-      })
+      return await handleNetflowMode(mint, privateKeys, percentage, slippageBps)
     }
 
     return Response.json(
