@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -53,6 +53,23 @@ export function UltraFastTradingPanel({ wallets, selectedWallets }: UltraFastTra
     if (!tokenMint.trim()) return
     await fetchPrice(tokenMint.trim())
   }
+
+  const playBuySuccessSound = () => {
+    try {
+      const audio = new Audio("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Apple%20Pay%20sound%20effect-Y8Lva1pUiq0AXmNZMcNJvPv5OKtv5A.mp3")
+      audio.volume = 0.5
+      audio.play().catch(console.error)
+    } catch (error) {
+      console.error("Failed to play buy success sound:", error)
+    }
+  }
+
+  useEffect(() => {
+    const newSuccessfulTrades = results.filter((r) => r.status === "success").length
+    if (newSuccessfulTrades > successfulTrades && !isTrading) {
+      playBuySuccessSound()
+    }
+  }, [results, isTrading])
 
   const handleBuy = async () => {
     if (!tokenMint.trim() || !buyAmount || selectedConnectedWallets.length === 0) return

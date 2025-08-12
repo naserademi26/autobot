@@ -6,87 +6,86 @@ import type { WalletData } from "@/hooks/useWalletManager"
 
 export interface TradeResult {
   id: string
-  walletId: string
   walletAddress: string
   type: "buy" | "sell"
-  status: "pending" | "success" | "error"
   amount: string
   tokenAmount?: number
+  status: "success" | "error" | "pending"
   signature?: string
   error?: string
   timestamp: number
   executionTime?: number
 }
 
+interface TradingProgress {
+  current: number
+  total: number
+}
+
 export function useUltraFastTrading() {
   const [results, setResults] = useState<TradeResult[]>([])
   const [isTrading, setIsTrading] = useState(false)
-  const [tradingProgress, setTradingProgress] = useState({ current: 0, total: 0 })
+  const [tradingProgress, setTradingProgress] = useState<TradingProgress>({ current: 0, total: 0 })
   const { toast } = useToast()
 
-  const executeBuy = useCallback(
-    async (wallets: WalletData[], tokenMint: string, buyAmount: number, slippage: number) => {
-      const selectedWallets = wallets.filter((w) => w.connected && w.balance > buyAmount + 0.01)
+  const playBuySuccessSound = () => {
+    try {
+      const audio = new Audio("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Apple%20Pay%20sound%20effect-Y8Lva1pUiq0AXmNZMcNJvPv5OKtv5A.mp3")
+      audio.volume = 0.5
+      audio.play().catch(console.error)
+    } catch (error) {
+      console.error("Failed to play buy success sound:", error)
+    }
+  }
 
+  const executeBuy = useCallback(
+    async (selectedWallets: WalletData[], tokenMint: string, amount: number, slippage: number) => {
       if (selectedWallets.length === 0) {
-        toast({
-          title: "❌ No Valid Wallets",
-          description: "No wallets with sufficient balance selected",
-          variant: "destructive",
-        })
+        toast({ title: "❌ No Wallets", description: "Select wallets first", variant: "destructive" })
         return
       }
-
-      console.log(`🚀 MAXIMUM SPEED SIMULTANEOUS BUY: Starting ${selectedWallets.length} wallets`)
-      console.log(`⚡ Token: ${tokenMint}`)
-      console.log(`💰 Amount: ${buyAmount} SOL per wallet`)
-      console.log(`📊 Slippage: ${slippage}%`)
-      console.log(`🔥 ULTRA-FAST MODE: ALL ${selectedWallets.length} WALLETS EXECUTE SIMULTANEOUSLY - NO DELAYS!`)
-      console.log(`🎯 TARGET: Complete ALL orders in 1-2 seconds!`)
 
       setIsTrading(true)
       setTradingProgress({ current: 0, total: selectedWallets.length })
 
       const startTime = Date.now()
-
-      // Create initial pending results
-      const pendingResults: TradeResult[] = selectedWallets.map((wallet) => ({
-        id: `${wallet.id}-${Date.now()}-${Math.random()}`,
-        walletId: wallet.id,
-        walletAddress: wallet.publicKey,
-        type: "buy",
-        status: "pending",
-        amount: `${buyAmount} SOL`,
-        timestamp: Date.now(),
-      }))
-
-      setResults((prev) => [...prev, ...pendingResults])
+      console.log(`🔥 STARTING MAXIMUM SPEED REAL SIMULTANEOUS BUY:`)
+      console.log(`   🎯 Token: ${tokenMint}`)
+      console.log(`   💰 Amount: ${amount} SOL per wallet`)
+      console.log(`   📊 Slippage: ${slippage}%`)
+      console.log(`   🚀 Wallets: ${selectedWallets.length}`)
+      console.log(`   ⚡ Mode: ALL WALLETS FIRE SIMULTANEOUSLY - NO DELAYS`)
 
       try {
-        console.log(`⚡ EXECUTING ${selectedWallets.length} REAL SIMULTANEOUS BUYS WITH Promise.all()...`)
-        console.log(`🔥 MAXIMUM SPEED: ALL ${selectedWallets.length} WALLETS FIRE AT ONCE - NO TIMEOUTS!`)
+        // Create pending results immediately
+        const pendingResults: TradeResult[] = selectedWallets.map((wallet, index) => ({
+          id: `${wallet.id}-${Date.now()}-${index}`,
+          walletAddress: wallet.publicKey,
+          type: "buy",
+          amount: `${amount} SOL`,
+          status: "pending",
+          timestamp: Date.now(),
+        }))
 
-        // Execute ALL REAL trades simultaneously with MAXIMUM SPEED - NO TIMEOUTS
+        // Add pending results to state
+        setResults((prev) => [...pendingResults, ...prev])
+
+        // Execute ALL trades simultaneously - NO DELAYS
         const tradePromises = selectedWallets.map(async (wallet, index) => {
           const tradeStartTime = Date.now()
 
           try {
-            console.log(`🚀 Wallet ${index + 1}/${selectedWallets.length}: FIRING REAL BUY IMMEDIATELY...`)
+            console.log(`🚀 Wallet ${index + 1}/${selectedWallets.length}: Starting REAL buy...`)
 
-            // Make REAL API call with NO TIMEOUT - Maximum speed execution
             const response = await fetch("/api/buy", {
               method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache",
-              },
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 privateKey: wallet.privateKey,
-                tokenMint: tokenMint,
-                amount: buyAmount,
-                slippage: slippage,
+                tokenMint,
+                amount,
+                slippage,
               }),
-              // NO TIMEOUT - Let all trades complete naturally for maximum speed
             })
 
             const result = await response.json()
@@ -97,6 +96,8 @@ export function useUltraFastTrading() {
               console.log(`   📡 Signature: ${result.signature}`)
               console.log(`   💰 Tokens: ${result.outputTokens}`)
               console.log(`   🔗 Solscan: ${result.solscanUrl}`)
+
+              playBuySuccessSound()
 
               return {
                 ...pendingResults[index],
@@ -186,93 +187,76 @@ export function useUltraFastTrading() {
   )
 
   const executeRandomPercentageBuy = useCallback(
-    async (wallets: WalletData[], tokenMint: string, slippage: number, minPercent: number, maxPercent: number) => {
-      const selectedWallets = wallets.filter((w) => w.connected && w.balance > 0.01)
-
+    async (
+      selectedWallets: WalletData[],
+      tokenMint: string,
+      slippage: number,
+      minPercent: number,
+      maxPercent: number,
+    ) => {
       if (selectedWallets.length === 0) {
-        toast({
-          title: "❌ No Valid Wallets",
-          description: "No wallets with sufficient balance selected",
-          variant: "destructive",
-        })
+        toast({ title: "❌ No Wallets", description: "Select wallets first", variant: "destructive" })
         return
       }
-
-      const isExactPercentage = minPercent === maxPercent
-
-      console.log(
-        `🔥 MAXIMUM SPEED ${isExactPercentage ? "EXACT" : "RANDOM"} PERCENTAGE BUY: Starting ${selectedWallets.length} wallets`,
-      )
-      console.log(`⚡ Token: ${tokenMint}`)
-      if (isExactPercentage) {
-        console.log(`📊 Exact Percentage: ${minPercent}% of wallet balance`)
-      } else {
-        console.log(`📊 Random Percentage Range: ${minPercent}% - ${maxPercent}% of wallet balance`)
-      }
-      console.log(`📊 Slippage: ${slippage}%`)
-      console.log(`🔥 ULTRA-FAST MODE: ALL ${selectedWallets.length} WALLETS EXECUTE SIMULTANEOUSLY - NO DELAYS!`)
-      console.log(`🎯 TARGET: Complete ALL orders in 1-2 seconds!`)
 
       setIsTrading(true)
       setTradingProgress({ current: 0, total: selectedWallets.length })
 
+      const isExactPercentage = minPercent === maxPercent
       const startTime = Date.now()
 
-      // Generate percentages - exact for preset mode, random for custom mode
-      const walletData = selectedWallets.map((wallet) => {
-        const percentage = isExactPercentage ? minPercent : minPercent + Math.random() * (maxPercent - minPercent)
-        const roundedPercentage = Math.round(percentage)
-        const availableBalance = wallet.balance - 0.01 // Keep 0.01 SOL for fees
-        const buyAmount = (availableBalance * roundedPercentage) / 100
-        return {
-          wallet,
-          percentage: roundedPercentage,
-          buyAmount: Math.max(0.001, buyAmount), // Minimum 0.001 SOL
-        }
-      })
-
-      // Create initial pending results with percentages
-      const pendingResults: TradeResult[] = walletData.map(({ wallet, percentage, buyAmount }) => ({
-        id: `${wallet.id}-${Date.now()}-${Math.random()}`,
-        walletId: wallet.id,
-        walletAddress: wallet.publicKey,
-        type: "buy",
-        status: "pending",
-        amount: `${buyAmount.toFixed(4)} SOL (${percentage}% of balance)`,
-        timestamp: Date.now(),
-      }))
-
-      setResults((prev) => [...prev, ...pendingResults])
+      console.log(`🔥 STARTING MAXIMUM SPEED REAL ${isExactPercentage ? "EXACT" : "RANDOM"} PERCENTAGE BUY:`)
+      console.log(`   🎯 Token: ${tokenMint}`)
+      console.log(`   📊 Slippage: ${slippage}%`)
+      console.log(`   🚀 Wallets: ${selectedWallets.length}`)
+      if (isExactPercentage) {
+        console.log(`   🎯 Exact percentage: ${minPercent}%`)
+      } else {
+        console.log(`   📊 Percentage range: ${minPercent}% - ${maxPercent}%`)
+      }
+      console.log(`   ⚡ Mode: ALL WALLETS FIRE SIMULTANEOUSLY - NO DELAYS`)
 
       try {
-        console.log(
-          `⚡ EXECUTING ${selectedWallets.length} REAL ${isExactPercentage ? "EXACT" : "RANDOM"} PERCENTAGE BUYS WITH Promise.all()...`,
-        )
-        console.log(`🔥 MAXIMUM SPEED: ALL ${selectedWallets.length} WALLETS FIRE AT ONCE - NO TIMEOUTS!`)
+        // Generate wallet data with percentages and amounts
+        const walletData = selectedWallets.map((wallet) => {
+          const percentage = isExactPercentage
+            ? minPercent
+            : Math.floor(Math.random() * (maxPercent - minPercent + 1)) + minPercent
+          const buyAmount = (wallet.balance * percentage) / 100
+          return { wallet, percentage, buyAmount }
+        })
 
-        // Execute ALL REAL trades simultaneously with MAXIMUM SPEED - NO TIMEOUTS
+        // Create pending results immediately
+        const pendingResults: TradeResult[] = walletData.map(({ wallet, percentage, buyAmount }, index) => ({
+          id: `${wallet.id}-${Date.now()}-${index}`,
+          walletAddress: wallet.publicKey,
+          type: "buy",
+          amount: `${buyAmount.toFixed(4)} SOL (${percentage}% of balance)`,
+          status: "pending",
+          timestamp: Date.now(),
+        }))
+
+        // Add pending results to state
+        setResults((prev) => [...pendingResults, ...prev])
+
+        // Execute ALL trades simultaneously - NO DELAYS
         const tradePromises = walletData.map(async ({ wallet, percentage, buyAmount }, index) => {
           const tradeStartTime = Date.now()
 
           try {
             console.log(
-              `🔥 Wallet ${index + 1}/${selectedWallets.length}: FIRING REAL ${isExactPercentage ? "exact" : "random"} buy (${percentage}% = ${buyAmount.toFixed(4)} SOL)...`,
+              `🚀 Wallet ${index + 1}/${selectedWallets.length}: Starting REAL ${isExactPercentage ? "EXACT" : "RANDOM"} buy (${percentage}%, ${buyAmount.toFixed(4)} SOL)...`,
             )
 
-            // Make REAL API call with NO TIMEOUT - Maximum speed execution
             const response = await fetch("/api/buy", {
               method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache",
-              },
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 privateKey: wallet.privateKey,
-                tokenMint: tokenMint,
+                tokenMint,
                 amount: buyAmount,
-                slippage: slippage,
+                slippage,
               }),
-              // NO TIMEOUT - Let all trades complete naturally for maximum speed
             })
 
             const result = await response.json()
@@ -287,6 +271,8 @@ export function useUltraFastTrading() {
               console.log(`   📡 Signature: ${result.signature}`)
               console.log(`   🪙 Tokens: ${result.outputTokens}`)
               console.log(`   🔗 Solscan: ${result.solscanUrl}`)
+
+              playBuySuccessSound()
 
               return {
                 ...pendingResults[index],
@@ -393,68 +379,53 @@ export function useUltraFastTrading() {
   )
 
   const executeSell = useCallback(
-    async (wallets: WalletData[], tokenMint: string, percentage: number, slippage: number) => {
-      const selectedWallets = wallets.filter((w) => w.connected)
-
+    async (selectedWallets: WalletData[], tokenMint: string, percentage: number, slippage: number) => {
       if (selectedWallets.length === 0) {
-        toast({
-          title: "❌ No Valid Wallets",
-          description: "No connected wallets selected",
-          variant: "destructive",
-        })
+        toast({ title: "❌ No Wallets", description: "Select wallets first", variant: "destructive" })
         return
       }
-
-      console.log(`🚀 MAXIMUM SPEED SIMULTANEOUS SELL: Starting ${selectedWallets.length} wallets`)
-      console.log(`⚡ Token: ${tokenMint}`)
-      console.log(`📊 Percentage: ${percentage}%`)
-      console.log(`📊 Slippage: ${slippage}%`)
-      console.log(`🔥 ULTRA-FAST MODE: ALL ${selectedWallets.length} WALLETS EXECUTE SIMULTANEOUSLY - NO DELAYS!`)
-      console.log(`🎯 TARGET: Complete ALL orders in 1-2 seconds!`)
 
       setIsTrading(true)
       setTradingProgress({ current: 0, total: selectedWallets.length })
 
       const startTime = Date.now()
-
-      // Create initial pending results
-      const pendingResults: TradeResult[] = selectedWallets.map((wallet) => ({
-        id: `${wallet.id}-${Date.now()}-${Math.random()}`,
-        walletId: wallet.id,
-        walletAddress: wallet.publicKey,
-        type: "sell",
-        status: "pending",
-        amount: `${percentage}% of tokens`,
-        timestamp: Date.now(),
-      }))
-
-      setResults((prev) => [...prev, ...pendingResults])
+      console.log(`🔥 STARTING MAXIMUM SPEED REAL SIMULTANEOUS SELL:`)
+      console.log(`   🎯 Token: ${tokenMint}`)
+      console.log(`   📊 Percentage: ${percentage}%`)
+      console.log(`   📊 Slippage: ${slippage}%`)
+      console.log(`   🚀 Wallets: ${selectedWallets.length}`)
+      console.log(`   ⚡ Mode: ALL WALLETS FIRE SIMULTANEOUSLY - NO DELAYS`)
 
       try {
-        console.log(`⚡ EXECUTING ${selectedWallets.length} REAL SIMULTANEOUS SELLS WITH Promise.all()...`)
-        console.log(`🔥 MAXIMUM SPEED: ALL ${selectedWallets.length} WALLETS FIRE AT ONCE - NO TIMEOUTS!`)
+        // Create pending results immediately
+        const pendingResults: TradeResult[] = selectedWallets.map((wallet, index) => ({
+          id: `${wallet.id}-${Date.now()}-${index}`,
+          walletAddress: wallet.publicKey,
+          type: "sell",
+          amount: `${percentage}% of tokens`,
+          status: "pending",
+          timestamp: Date.now(),
+        }))
 
-        // Execute ALL REAL sells simultaneously with MAXIMUM SPEED - NO TIMEOUTS
+        // Add pending results to state
+        setResults((prev) => [...pendingResults, ...prev])
+
+        // Execute ALL trades simultaneously - NO DELAYS
         const tradePromises = selectedWallets.map(async (wallet, index) => {
           const tradeStartTime = Date.now()
 
           try {
-            console.log(`🚀 Wallet ${index + 1}/${selectedWallets.length}: FIRING REAL SELL IMMEDIATELY...`)
+            console.log(`🚀 Wallet ${index + 1}/${selectedWallets.length}: Starting REAL sell...`)
 
-            // Make REAL API call with NO TIMEOUT - Maximum speed execution
             const response = await fetch("/api/sell", {
               method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Cache-Control": "no-cache",
-              },
+              headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 privateKey: wallet.privateKey,
-                tokenMint: tokenMint,
-                percentage: percentage,
-                slippage: slippage,
+                mint: tokenMint,
+                percentage,
+                slippage,
               }),
-              // NO TIMEOUT - Let all trades complete naturally for maximum speed
             })
 
             const result = await response.json()
@@ -463,13 +434,13 @@ export function useUltraFastTrading() {
             if (result.success) {
               console.log(`✅ Wallet ${index + 1}/${selectedWallets.length}: REAL SELL SUCCESS in ${executionTime}ms`)
               console.log(`   📡 Signature: ${result.signature}`)
-              console.log(`   💰 SOL Received: ${result.receivedSOL}`)
+              console.log(`   💰 SOL received: ${result.solReceived}`)
               console.log(`   🔗 Solscan: ${result.solscanUrl}`)
 
               return {
                 ...pendingResults[index],
                 status: "success" as const,
-                tokenAmount: Number.parseFloat(result.receivedSOL),
+                tokenAmount: Number.parseFloat(result.solReceived || "0"),
                 signature: result.signature,
                 executionTime,
               }
@@ -498,7 +469,7 @@ export function useUltraFastTrading() {
           }
         })
 
-        // Wait for ALL REAL sells to complete simultaneously - NO TIMEOUTS
+        // Wait for ALL REAL trades to complete simultaneously - NO TIMEOUTS
         const completedResults = await Promise.all(tradePromises)
 
         // Update results with completed trades
@@ -535,7 +506,7 @@ export function useUltraFastTrading() {
         console.log(`   🔥 NO TIMEOUTS - MAXIMUM EXECUTION SPEED ACHIEVED!`)
 
         toast({
-          title: `🔥 ${isUnder1Second ? "LIGHTNING SPEED!" : isUnder2Seconds ? "ULTRA SPEED!" : "Real Simultaneous Sell Complete!"}`,
+          title: `🔥 ${isUnder1Second ? "LIGHTNING SPEED!" : isUnder2Seconds ? "ULTRA SPEED!" : "SELL COMPLETE!"}`,
           description: `✅ ${successCount} successful, ❌ ${failureCount} failed in ${(totalExecutionTime / 1000).toFixed(3)}s ${isUnder1Second ? "⚡ <1s!" : isUnder2Seconds ? "⚡ <2s!" : ""}`,
         })
       } catch (error: any) {
