@@ -94,12 +94,13 @@ async function analyzeTransactionVolume(
         commitment: "confirmed",
         maxSupportedTransactionVersion: 0,
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 1500)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 3000)),
     ])) as any
 
     if (!tx?.meta || tx.meta.err) return null
 
     const mintPubkey = new PublicKey(mint)
+    const normalizedMint = mintPubkey.toString()
     let netSolChange = 0
     let tokenChange = 0
     let hasTokenActivity = false
@@ -118,7 +119,7 @@ async function analyzeTransactionVolume(
 
     if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
       for (const preToken of tx.meta.preTokenBalances) {
-        if (preToken.mint === mint) {
+        if (preToken.mint === normalizedMint || preToken.mint === mint) {
           hasTokenActivity = true
           const postToken = tx.meta.postTokenBalances.find((post) => post.accountIndex === preToken.accountIndex)
           if (postToken) {
@@ -130,11 +131,24 @@ async function analyzeTransactionVolume(
       }
 
       for (const postToken of tx.meta.postTokenBalances) {
-        if (postToken.mint === mint) {
+        if (postToken.mint === normalizedMint || postToken.mint === mint) {
           const preToken = tx.meta.preTokenBalances.find((pre) => pre.accountIndex === postToken.accountIndex)
           if (!preToken) {
             hasTokenActivity = true
             tokenChange += postToken.uiTokenAmount?.uiAmount || 0
+          }
+        }
+      }
+    }
+
+    if (!hasTokenActivity && tx.transaction?.message?.instructions) {
+      for (const instruction of tx.transaction.message.instructions) {
+        if (instruction.parsed?.type === "transfer" || instruction.parsed?.type === "transferChecked") {
+          const info = instruction.parsed?.info
+          if (info?.mint === normalizedMint || info?.mint === mint) {
+            hasTokenActivity = true
+            const amount = info?.tokenAmount?.uiAmount || info?.amount || 0
+            tokenChange += amount
           }
         }
       }
@@ -147,7 +161,7 @@ async function analyzeTransactionVolume(
     const isBuy = tokenChange > 0
     const solAmount = netSolChange
 
-    if (solAmount < 0.001) {
+    if (solAmount < 0.0001) {
       return null
     }
 
@@ -157,6 +171,7 @@ async function analyzeTransactionVolume(
 
     return { isBuy, solAmount }
   } catch (error) {
+    console.error(`❌ Error analyzing transaction ${signature.slice(0, 8)}:`, error)
     return null
   }
 }
@@ -177,8 +192,8 @@ async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percen
         const volumeData = await quickVolumeCheck(connection, mint)
 
         const totalVolume = volumeData.buyVolume + volumeData.sellVolume
-        const hasSignificantActivity = totalVolume > 0.01 // At least 0.01 SOL total volume
-        const hasBuyActivity = volumeData.buyVolume > 0.005 // At least 0.005 SOL buy volume
+        const hasSignificantActivity = totalVolume > 0.001 // Lowered from 0.01 to 0.001 SOL
+        const hasBuyActivity = volumeData.buyVolume > 0.0005 // Lowered from 0.005 to 0.0005 SOL
 
         console.log(
           `📈 Volume analysis: Total: ${totalVolume.toFixed(4)} SOL, Buy: ${volumeData.buyVolume.toFixed(4)} SOL`,
@@ -234,11 +249,11 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
 
   try {
     const signatures = (await Promise.race([
-      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 20 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 5000)),
+      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 30 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 7000)),
     ])) as any[]
 
-    const recentSigs = signatures.slice(0, 10)
+    const recentSigs = signatures.slice(0, 15)
     console.log(`🔍 Analyzing ${recentSigs.length} recent transactions`)
 
     for (const sigInfo of recentSigs) {
