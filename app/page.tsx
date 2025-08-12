@@ -3,6 +3,25 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import bs58 from "bs58"
 import { Connection, PublicKey } from "@solana/web3.js"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Badge } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
+import {
+  Wallet,
+  RefreshCw,
+  Play,
+  Pause,
+  Settings,
+  TrendingUp,
+  TrendingDown,
+  Activity,
+  DollarSign,
+  Clock,
+  Target,
+} from "lucide-react"
 
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
 
@@ -10,6 +29,39 @@ interface TokenInfo {
   name?: string
   symbol?: string
   source?: "jup" | "pump" | "unknown"
+}
+
+interface AutoSellConfig {
+  mint: string
+  windowSeconds: number
+  minTradeUsd: number
+  sellFractionOfNetUsd: number
+  cooldownSeconds: number
+  slippageBps: number
+}
+
+interface AutoSellStatus {
+  isRunning: boolean
+  config: AutoSellConfig | null
+  metrics: {
+    buys: number
+    sells: number
+    net: number
+    priceUsd: number
+  }
+  recentTrades: Array<{
+    side: "buy" | "sell"
+    usd: number
+    timestamp: number
+  }>
+  walletStatus: Array<{
+    name: string
+    publicKey: string
+    balance: number
+    tokenBalance: number
+    cooldownUntil: number
+    lastSig: string
+  }>
 }
 
 const ENDPOINT =
@@ -34,28 +86,43 @@ function sanitizeMintInput(input: string): string {
   return s.replace(/[^1-9A-HJ-NP-Za-km-z]/g, "")
 }
 
-export default function Home() {
+export default function AutoSellDashboard() {
   const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
 
+  // Wallet management
   const [vaultKeys, setVaultKeys] = useState<string>("")
   const [connected, setConnected] = useState<VaultEntry[]>([])
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [balances, setBalances] = useState<Record<string, number>>({})
   const [balancesLoading, setBalancesLoading] = useState(false)
 
+  // Token configuration
   const [mintRaw, setMintRaw] = useState<string>("")
   const mint = useMemo(() => sanitizeMintInput(mintRaw), [mintRaw])
   const [token, setToken] = useState<TokenInfo>({})
 
-  const [activeTab, setActiveTab] = useState<"buy" | "sell">("buy")
-  const [buyPerc, setBuyPerc] = useState<number>(50)
-  const [sellPerc, setSellPerc] = useState<number>(100)
-  const [slippageBps, setSlippageBps] = useState<number>(2000)
+  // Auto-sell configuration
+  const [config, setConfig] = useState<AutoSellConfig>({
+    mint: "",
+    windowSeconds: 120,
+    minTradeUsd: 1,
+    sellFractionOfNetUsd: 0.25,
+    cooldownSeconds: 30,
+    slippageBps: 100,
+  })
+
+  // Auto-sell status
+  const [status, setStatus] = useState<AutoSellStatus>({
+    isRunning: false,
+    config: null,
+    metrics: { buys: 0, sells: 0, net: 0, priceUsd: 0 },
+    recentTrades: [],
+    walletStatus: [],
+  })
 
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string>("")
-
   const refreshId = useRef(0)
 
   useEffect(() => {
@@ -72,6 +139,26 @@ export default function Home() {
       mounted = false
     }
   }, [connection])
+
+  useEffect(() => {
+    setConfig((prev) => ({ ...prev, mint }))
+  }, [mint])
+
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch("/api/auto-sell/status")
+        if (res.ok) {
+          const data = await res.json()
+          setStatus(data)
+        }
+      } catch (error) {
+        console.error("Failed to fetch status:", error)
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [])
 
   async function addVault() {
     const lines = vaultKeys
@@ -169,89 +256,52 @@ export default function Home() {
     setSelected(s)
   }
 
-  const playBuySuccessSound = () => {
-    try {
-      const audio = new Audio("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Apple%20Pay%20sound%20effect-Y8Lva1pUiq0AXmNZMcNJvPv5OKtv5A.mp3")
-      audio.volume = 0.3
-      audio.play().catch(console.error)
-    } catch (error) {
-      console.error("Failed to play buy success sound:", error)
-    }
-  }
-
-  async function buy() {
+  async function startAutoSell() {
     setLoading(true)
-    setLog(`🚀 Executing ultra-fast buy with all selected wallets simultaneously...`)
+    setLog(`🚀 Starting auto-sell engine...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 30000)
 
-      const res = await fetch("/api/snipe", {
+      const res = await fetch("/api/auto-sell/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        signal: controller.signal,
         body: JSON.stringify({
-          mint,
-          privateKeys: keys.slice(0, 65),
-          limitWallets: 65,
-          percentage: buyPerc,
-          slippageBps,
+          config,
+          privateKeys: keys,
         }),
       })
 
-      clearTimeout(timeoutId)
-      const j = await res.json()
-      setLog(JSON.stringify(j, null, 2))
+      const result = await res.json()
+      setLog(JSON.stringify(result, null, 2))
 
-      if (res.ok && j && !j.error) {
-        playBuySuccessSound()
+      if (res.ok) {
+        setLog(`✅ Auto-sell engine started successfully!`)
       }
     } catch (e: any) {
-      if (e.name === "AbortError") {
-        setLog(`Timeout: Operation took longer than 30 seconds`)
-      } else {
-        setLog(`Error: ${e?.message || String(e)}`)
-      }
+      setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
       setLoading(false)
     }
   }
 
-  async function sell() {
+  async function stopAutoSell() {
     setLoading(true)
-    setLog(`🚀 Executing ultra-fast sell with all selected wallets simultaneously...`)
+    setLog(`⏹️ Stopping auto-sell engine...`)
 
     try {
-      const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 30000)
-
-      const res = await fetch("/api/sell", {
+      const res = await fetch("/api/auto-sell/stop", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        signal: controller.signal,
-        body: JSON.stringify({
-          mint,
-          privateKeys: keys.slice(0, 65),
-          limitWallets: 65,
-          percentage: sellPerc,
-          slippageBps,
-        }),
       })
 
-      clearTimeout(timeoutId)
-      const j = await res.json()
-      setLog(JSON.stringify(j, null, 2))
-    } catch (e: any) {
-      if (e.name === "AbortError") {
-        setLog(`Timeout: Operation took longer than 30 seconds`)
-      } else {
-        setLog(`Error: ${e?.message || String(e)}`)
+      const result = await res.json()
+      setLog(JSON.stringify(result, null, 2))
+
+      if (res.ok) {
+        setLog(`✅ Auto-sell engine stopped successfully!`)
       }
+    } catch (e: any) {
+      setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
       setLoading(false)
     }
@@ -266,257 +316,359 @@ export default function Home() {
       }, 0),
     [connected, selected, balances],
   )
-  const totalVaultSol = useMemo(
-    () => connected.reduce((acc, w) => acc + (balances[w.pubkey] ?? 0), 0),
-    [connected, balances],
-  )
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
+    <div className="max-w-7xl mx-auto p-6 space-y-6">
       <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Solana Sniper · 65 Wallets</h1>
-          <p className="text-slate-400 text-sm">Paste keys, pick mint, execute ultra-fast buy/sell.</p>
+          <h1 className="text-3xl font-bold gradient-text">🤖 Solana Auto-Sell Engine</h1>
+          <p className="text-slate-400 text-sm">Intelligent trade monitoring with automatic sell execution</p>
         </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
-          <span className="text-slate-400">RPC: </span>
-          <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-slate-400"}>
-            {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
-          </span>
+        <div className="flex items-center gap-3">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
+            <span className="text-slate-400">RPC: </span>
+            <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-slate-400"}>
+              {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+          <Badge
+            variant={status.isRunning ? "default" : "secondary"}
+            className={status.isRunning ? "bg-green-600 animate-pulse" : "bg-gray-600"}
+          >
+            {status.isRunning ? "🟢 RUNNING" : "🔴 STOPPED"}
+          </Badge>
         </div>
       </header>
 
-      <section className="grid md:grid-cols-2 gap-6">
-        <div className="card space-y-3">
-          <h2 className="font-semibold">1) Connect wallets (local vault)</h2>
-          <textarea
-            className="input min-h-[140px] font-mono"
-            placeholder="One base58 or JSON secret array per line"
-            value={vaultKeys}
-            onChange={(e) => setVaultKeys(e.target.value)}
-          />
-          <div className="flex flex-wrap gap-2">
-            <button className="btn" onClick={() => addVault()}>
-              Add to vault
-            </button>
-            <button
-              className="btn bg-slate-700 hover:bg-slate-600"
-              onClick={() => {
-                setConnected([])
-                setSelected({})
-                setBalances({})
-              }}
-            >
-              Clear
-            </button>
-            <button className="btn bg-slate-700 hover:bg-slate-600" onClick={() => toggleAll(true)}>
-              Select all
-            </button>
-            <button className="btn bg-slate-700 hover:bg-slate-600" onClick={() => toggleAll(false)}>
-              Unselect all
-            </button>
-            <button
-              className="btn bg-indigo-700 hover:bg-indigo-600"
-              onClick={() => refreshBalances()}
-              disabled={balancesLoading}
-            >
-              {balancesLoading ? "Refreshing…" : "Refresh balances"}
-            </button>
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Configuration Panel */}
+        <div className="lg:col-span-1 space-y-6">
+          {/* Wallet Management */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet className="w-5 h-5" />
+                Wallet Configuration
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <textarea
+                className="input min-h-[120px] font-mono text-xs"
+                placeholder="One base58 or JSON secret array per line"
+                value={vaultKeys}
+                onChange={(e) => setVaultKeys(e.target.value)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={addVault}>
+                  Add Wallets
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setConnected([])}>
+                  Clear
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => toggleAll(true)}>
+                  Select All
+                </Button>
+                <Button size="sm" variant="outline" onClick={refreshBalances} disabled={balancesLoading}>
+                  <RefreshCw className={`w-4 h-4 ${balancesLoading ? "animate-spin" : ""}`} />
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div className="bg-slate-800/50 p-3 rounded-lg text-center">
+                  <div className="text-xl font-bold text-blue-400">{connected.length}</div>
+                  <div className="text-slate-400">Wallets</div>
+                </div>
+                <div className="bg-slate-800/50 p-3 rounded-lg text-center">
+                  <div className="text-xl font-bold text-green-400">{selectedCount}</div>
+                  <div className="text-slate-400">Selected</div>
+                </div>
+              </div>
+
+              {connected.length > 0 && (
+                <div className="max-h-40 overflow-auto border border-slate-700 rounded-lg p-2">
+                  {connected.map((w) => (
+                    <div key={w.pubkey} className="flex items-center gap-2 py-1">
+                      <input
+                        type="checkbox"
+                        checked={!!selected[w.pubkey]}
+                        onChange={(e) => setSelected({ ...selected, [w.pubkey]: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="font-mono text-xs text-slate-300">
+                        {w.pubkey.slice(0, 6)}...{w.pubkey.slice(-4)}
+                      </span>
+                      <span className="text-xs text-slate-400 ml-auto">
+                        {balances[w.pubkey]?.toFixed(3) || "0.000"} SOL
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Token Configuration */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Target className="w-5 h-5" />
+                Token & Settings
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <Label>Token Mint Address</Label>
+                <Input
+                  placeholder="Paste mint address or pump.fun URL"
+                  value={mintRaw}
+                  onChange={(e) => setMintRaw(e.target.value)}
+                  className="font-mono text-sm"
+                />
+                {token.name && (
+                  <p className="text-sm text-green-400 mt-1">
+                    ✅ {token.name} ({token.symbol}) via {token.source}
+                  </p>
+                )}
+              </div>
+
+              <Separator />
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Window (seconds)</Label>
+                  <Input
+                    type="number"
+                    value={config.windowSeconds}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, windowSeconds: Number(e.target.value) }))}
+                  />
+                </div>
+                <div>
+                  <Label>Min Trade USD</Label>
+                  <Input
+                    type="number"
+                    step="0.1"
+                    value={config.minTradeUsd}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, minTradeUsd: Number(e.target.value) }))}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Sell Fraction</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={config.sellFractionOfNetUsd}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, sellFractionOfNetUsd: Number(e.target.value) }))}
+                  />
+                </div>
+                <div>
+                  <Label>Cooldown (sec)</Label>
+                  <Input
+                    type="number"
+                    value={config.cooldownSeconds}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, cooldownSeconds: Number(e.target.value) }))}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <Label>Slippage (bps)</Label>
+                <Input
+                  type="number"
+                  value={config.slippageBps}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
+                />
+                <p className="text-xs text-slate-400 mt-1">100 bps = 1%</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Control Panel */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Settings className="w-5 h-5" />
+                Engine Control
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <Button
+                  onClick={startAutoSell}
+                  disabled={loading || status.isRunning || !mint || selectedCount === 0}
+                  className="bg-green-600 hover:bg-green-700"
+                >
+                  {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  Start
+                </Button>
+                <Button onClick={stopAutoSell} disabled={loading || !status.isRunning} variant="destructive">
+                  {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Pause className="w-4 h-4" />}
+                  Stop
+                </Button>
+              </div>
+
+              {status.config && (
+                <div className="text-xs text-slate-400 space-y-1">
+                  <div>Window: {status.config.windowSeconds}s</div>
+                  <div>Sell Fraction: {(status.config.sellFractionOfNetUsd * 100).toFixed(1)}%</div>
+                  <div>Cooldown: {status.config.cooldownSeconds}s</div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Monitoring Dashboard */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Metrics Overview */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card className="bg-green-900/20 border-green-600/50">
+              <CardContent className="p-4 text-center">
+                <TrendingUp className="w-8 h-8 mx-auto mb-2 text-green-400" />
+                <div className="text-2xl font-bold text-green-400">${status.metrics.buys.toFixed(2)}</div>
+                <div className="text-sm text-green-300">Buys (Window)</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-red-900/20 border-red-600/50">
+              <CardContent className="p-4 text-center">
+                <TrendingDown className="w-8 h-8 mx-auto mb-2 text-red-400" />
+                <div className="text-2xl font-bold text-red-400">${status.metrics.sells.toFixed(2)}</div>
+                <div className="text-sm text-red-300">Sells (Window)</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-blue-900/20 border-blue-600/50">
+              <CardContent className="p-4 text-center">
+                <DollarSign className="w-8 h-8 mx-auto mb-2 text-blue-400" />
+                <div className="text-2xl font-bold text-blue-400">${status.metrics.net.toFixed(2)}</div>
+                <div className="text-sm text-blue-300">Net Position</div>
+              </CardContent>
+            </Card>
+
+            <Card className="bg-yellow-900/20 border-yellow-600/50">
+              <CardContent className="p-4 text-center">
+                <Activity className="w-8 h-8 mx-auto mb-2 text-yellow-400" />
+                <div className="text-2xl font-bold text-yellow-400">${status.metrics.priceUsd.toFixed(6)}</div>
+                <div className="text-sm text-yellow-300">Token Price</div>
+              </CardContent>
+            </Card>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm text-slate-300">
-            <div>Vault wallets: {connected.length}</div>
-            <div>Selected: {selectedCount}</div>
-            <div>
-              Selected SOL: <span className="font-mono text-white">{totalSelectedSol.toFixed(4)} SOL</span>
-            </div>
-            <div>
-              Total SOL: <span className="font-mono text-white">{totalVaultSol.toFixed(4)} SOL</span>
-            </div>
-          </div>
-
-          <div className="max-h-72 overflow-auto border border-slate-800 rounded-xl p-2">
-            {connected.length === 0 ? (
-              <p className="text-slate-400 text-sm">No vault wallets yet.</p>
-            ) : (
-              <ul className="space-y-1 text-sm">
-                {connected.map((w) => {
-                  const bal = balances[w.pubkey]
-                  return (
-                    <li key={w.pubkey} className="flex items-center justify-between gap-2">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={!!selected[w.pubkey]}
-                          onChange={(e) => setSelected({ ...selected, [w.pubkey]: e.target.checked })}
-                        />
-                        <span className="font-mono">{w.pubkey}</span>
-                      </label>
+          {/* Recent Trades */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Activity className="w-5 h-5" />
+                Recent Trades (Last {config.windowSeconds}s)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {status.recentTrades.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">
+                  <Activity className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No trades detected yet</p>
+                  <p className="text-sm">Monitoring for trade activity...</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-auto">
+                  {status.recentTrades.map((trade, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
                       <div className="flex items-center gap-3">
-                        <span className="font-mono tabular-nums">{bal == null ? "…" : `${bal.toFixed(4)} SOL`}</span>
-                        <span className={w.hasSecret ? "text-emerald-400" : "text-yellow-400"}>
-                          {w.hasSecret ? "secret" : "read-only"}
+                        {trade.side === "buy" ? (
+                          <TrendingUp className="w-4 h-4 text-green-400" />
+                        ) : (
+                          <TrendingDown className="w-4 h-4 text-red-400" />
+                        )}
+                        <span className={`font-semibold ${trade.side === "buy" ? "text-green-400" : "text-red-400"}`}>
+                          {trade.side.toUpperCase()}
                         </span>
                       </div>
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-          </div>
-        </div>
-
-        <div className="card space-y-3">
-          <h2 className="font-semibold">2) Pick token</h2>
-          <input
-            className="input"
-            placeholder="Paste mint address or pump.fun URL"
-            value={mintRaw}
-            onChange={(e) => setMintRaw(e.target.value)}
-          />
-          <div className="text-xs text-slate-400">
-            Using mint: <span className="text-white font-mono">{mint || "—"}</span>
-          </div>
-
-          <div className="text-sm text-slate-300">
-            {token.name ? (
-              <p>
-                Resolved: <span className="text-white font-semibold">{token.name}</span>{" "}
-                {token.symbol ? `(${token.symbol})` : ""} <span className="text-slate-400">via {token.source}</span>
-              </p>
-            ) : (
-              <p>We try Jupiter first, then Pump.fun metadata.</p>
-            )}
-          </div>
-
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => setActiveTab("buy")}
-              className={`btn flex-1 ${activeTab === "buy" ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-            >
-              🚀 BUY
-            </button>
-            <button
-              onClick={() => setActiveTab("sell")}
-              className={`btn flex-1 ${activeTab === "sell" ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-            >
-              💰 SELL
-            </button>
-          </div>
-
-          <label className="block text-xs text-slate-400 mt-2">
-            Slippage (bps):
-            <input
-              className="input mt-1"
-              type="number"
-              min={100}
-              step={100}
-              value={slippageBps}
-              onChange={(e) => setSlippageBps(Math.max(100, Number(e.target.value || 0)))}
-            />
-          </label>
-          <p className="text-xs text-slate-400">2000 bps = 20%. Higher slippage = faster fills on new launches.</p>
-
-          {activeTab === "buy" ? (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <label className="block text-xs text-slate-400">Buy percentage of SOL balance:</label>
-                <div className="grid grid-cols-5 gap-2">
-                  <button
-                    onClick={() => setBuyPerc(25)}
-                    className={`btn text-xs py-2 ${buyPerc === 25 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    25%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(50)}
-                    className={`btn text-xs py-2 ${buyPerc === 50 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    50%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(75)}
-                    className={`btn text-xs py-2 ${buyPerc === 75 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    75%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(95)}
-                    className={`btn text-xs py-2 ${buyPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    95%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(100)}
-                    className={`btn text-xs py-2 ${buyPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    100%
-                  </button>
+                      <div className="text-right">
+                        <div className="font-mono text-white">${trade.usd.toFixed(2)}</div>
+                        <div className="text-xs text-slate-400">{new Date(trade.timestamp).toLocaleTimeString()}</div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-                <div className="text-xs text-slate-400">Selected: {buyPerc}% of available SOL balance</div>
-              </div>
-              <button
-                className="btn w-full bg-blue-600 hover:bg-blue-500"
-                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
-                onClick={buy}
-              >
-                {loading ? "🚀 Buying..." : "🚀 BUY"}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <label className="block text-xs text-slate-400">Sell percentage of token balance:</label>
-                <div className="grid grid-cols-5 gap-2">
-                  <button
-                    onClick={() => setSellPerc(25)}
-                    className={`btn text-xs py-2 ${sellPerc === 25 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    25%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(50)}
-                    className={`btn text-xs py-2 ${sellPerc === 50 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    50%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(75)}
-                    className={`btn text-xs py-2 ${sellPerc === 75 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    75%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(95)}
-                    className={`btn text-xs py-2 ${sellPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    95%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(100)}
-                    className={`btn text-xs py-2 ${sellPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    100%
-                  </button>
-                </div>
-                <div className="text-xs text-slate-400">Selected: {sellPerc}% of available token balance</div>
-              </div>
-              <button
-                className="btn w-full bg-orange-600 hover:bg-orange-500"
-                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
-                onClick={sell}
-              >
-                {loading ? "💰 Selling..." : "💰 SELL"}
-              </button>
-            </div>
-          )}
-        </div>
-      </section>
+              )}
+            </CardContent>
+          </Card>
 
-      <section className="card">
-        <h2 className="font-semibold mb-2">Run output</h2>
-        <pre className="text-xs whitespace-pre-wrap">{log}</pre>
-      </section>
+          {/* Wallet Status */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet className="w-5 h-5" />
+                Wallet Status
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {status.walletStatus.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">
+                  <Wallet className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No wallets configured</p>
+                  <p className="text-sm">Start the engine to see wallet status</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-60 overflow-auto">
+                  {status.walletStatus.map((wallet, idx) => (
+                    <div key={idx} className="p-3 bg-slate-800/50 rounded-lg">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-mono text-sm text-slate-300">
+                          {wallet.publicKey.slice(0, 8)}...{wallet.publicKey.slice(-4)}
+                        </span>
+                        <Badge variant={wallet.cooldownUntil > Date.now() ? "secondary" : "default"}>
+                          {wallet.cooldownUntil > Date.now() ? (
+                            <>
+                              <Clock className="w-3 h-3 mr-1" />
+                              Cooldown
+                            </>
+                          ) : (
+                            "Ready"
+                          )}
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div>
+                          <span className="text-slate-400">SOL: </span>
+                          <span className="text-white font-mono">{wallet.balance.toFixed(4)}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-400">Tokens: </span>
+                          <span className="text-white font-mono">{wallet.tokenBalance.toFixed(2)}</span>
+                        </div>
+                      </div>
+                      {wallet.lastSig && (
+                        <div className="mt-2 text-xs">
+                          <span className="text-slate-400">Last TX: </span>
+                          <span className="text-blue-400 font-mono">{wallet.lastSig.slice(0, 8)}...</span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* System Log */}
+          <Card className="bg-slate-900/50 border-slate-800">
+            <CardHeader>
+              <CardTitle>System Log</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <pre className="text-xs whitespace-pre-wrap bg-black/30 p-4 rounded-lg max-h-40 overflow-auto">
+                {log || "System ready. Configure settings and start the auto-sell engine."}
+              </pre>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   )
 }
