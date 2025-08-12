@@ -94,82 +94,106 @@ async function analyzeTransactionVolume(
         commitment: "confirmed",
         maxSupportedTransactionVersion: 0,
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 3000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 5000)),
     ])) as any
 
     if (!tx?.meta || tx.meta.err) return null
 
     const mintPubkey = new PublicKey(mint)
     const normalizedMint = mintPubkey.toString()
-    let netSolChange = 0
-    let tokenChange = 0
-    let hasTokenActivity = false
 
-    const preBalances = tx.meta.preBalances
-    const postBalances = tx.meta.postBalances
-    const accountKeys = tx.transaction.message.accountKeys
+    const jupiterPrograms = [
+      "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter V6
+      "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", // Jupiter V4
+      "JUP3c2Uh3WA4Ng34tw6kPd2G4C5BB21Xo36Je1s32Ph", // Jupiter V3
+    ]
 
-    for (let i = 0; i < preBalances.length; i++) {
-      const account = accountKeys[i]
-      if (account && !account.toString().includes("11111111111111111111111111111111")) {
-        const solChange = (postBalances[i] - preBalances[i]) / 1e9
-        netSolChange += Math.abs(solChange)
+    let hasJupiterSwap = false
+    let tokenAmountChange = 0
+    let solAmountChange = 0
+
+    // Check if this is a Jupiter swap - improved detection
+    if (tx.transaction?.message?.accountKeys) {
+      for (const account of tx.transaction.message.accountKeys) {
+        const accountStr = typeof account === "string" ? account : account.toString()
+        if (jupiterPrograms.includes(accountStr)) {
+          hasJupiterSwap = true
+          break
+        }
+      }
+    }
+
+    if (!hasJupiterSwap && tx.transaction?.message?.instructions) {
+      for (const instruction of tx.transaction.message.instructions) {
+        if (instruction.programId) {
+          const programIdStr =
+            typeof instruction.programId === "string" ? instruction.programId : instruction.programId.toString()
+          if (jupiterPrograms.includes(programIdStr)) {
+            hasJupiterSwap = true
+            break
+          }
+        }
       }
     }
 
     if (tx.meta.preTokenBalances && tx.meta.postTokenBalances) {
-      for (const preToken of tx.meta.preTokenBalances) {
-        if (preToken.mint === normalizedMint || preToken.mint === mint) {
-          hasTokenActivity = true
-          const postToken = tx.meta.postTokenBalances.find((post) => post.accountIndex === preToken.accountIndex)
-          if (postToken) {
-            const preAmount = preToken.uiTokenAmount?.uiAmount || 0
-            const postAmount = postToken.uiTokenAmount?.uiAmount || 0
-            tokenChange += postAmount - preAmount
-          }
-        }
-      }
-
       for (const postToken of tx.meta.postTokenBalances) {
         if (postToken.mint === normalizedMint || postToken.mint === mint) {
           const preToken = tx.meta.preTokenBalances.find((pre) => pre.accountIndex === postToken.accountIndex)
-          if (!preToken) {
-            hasTokenActivity = true
-            tokenChange += postToken.uiTokenAmount?.uiAmount || 0
+
+          const preAmount = preToken?.uiTokenAmount?.uiAmount || 0
+          const postAmount = postToken.uiTokenAmount?.uiAmount || 0
+          const change = postAmount - preAmount
+
+          if (Math.abs(change) > 0.001) {
+            tokenAmountChange += change
+          }
+        }
+      }
+
+      // Check for new token accounts (buys) - more aggressive detection
+      for (const postToken of tx.meta.postTokenBalances) {
+        if (postToken.mint === normalizedMint || postToken.mint === mint) {
+          const hasPreBalance = tx.meta.preTokenBalances.some((pre) => pre.accountIndex === postToken.accountIndex)
+          if (!hasPreBalance && postToken.uiTokenAmount?.uiAmount > 0.001) {
+            tokenAmountChange += postToken.uiTokenAmount.uiAmount
           }
         }
       }
     }
 
-    if (!hasTokenActivity && tx.transaction?.message?.instructions) {
-      for (const instruction of tx.transaction.message.instructions) {
-        if (instruction.parsed?.type === "transfer" || instruction.parsed?.type === "transferChecked") {
-          const info = instruction.parsed?.info
-          if (info?.mint === normalizedMint || info?.mint === mint) {
-            hasTokenActivity = true
-            const amount = info?.tokenAmount?.uiAmount || info?.amount || 0
-            tokenChange += amount
-          }
-        }
+    const preBalances = tx.meta.preBalances || []
+    const postBalances = tx.meta.postBalances || []
+
+    for (let i = 0; i < Math.min(preBalances.length, postBalances.length); i++) {
+      const solChange = (postBalances[i] - preBalances[i]) / 1e9
+      if (Math.abs(solChange) > 0.0005) {
+        // Lower threshold
+        solAmountChange += Math.abs(solChange)
       }
     }
 
-    if (!hasTokenActivity || Math.abs(tokenChange) < 0.000001) {
+    // Determine if this is a buy or sell
+    const isBuy = tokenAmountChange > 0
+    const isSell = tokenAmountChange < 0
+
+    if (Math.abs(tokenAmountChange) < 0.001 && solAmountChange < 0.0005) {
       return null
     }
 
-    const isBuy = tokenChange > 0
-    const solAmount = netSolChange
-
-    if (solAmount < 0.0001) {
+    const minSolAmount = 0.0001 // Much lower threshold
+    if (solAmountChange < minSolAmount && Math.abs(tokenAmountChange) < 0.001) {
       return null
     }
 
     console.log(
-      `📊 Transaction ${signature.slice(0, 8)}...: ${isBuy ? "BUY" : "SELL"} ${solAmount.toFixed(4)} SOL, Token change: ${tokenChange.toFixed(6)}`,
+      `📊 ${hasJupiterSwap ? "Jupiter" : "DEX"} Transaction ${signature.slice(0, 8)}...: ${isBuy ? "BUY" : isSell ? "SELL" : "UNKNOWN"} ${solAmountChange.toFixed(4)} SOL, Token change: ${tokenAmountChange.toFixed(2)}`,
     )
 
-    return { isBuy, solAmount }
+    return {
+      isBuy: isBuy || solAmountChange > 0.0005, // More aggressive buy detection
+      solAmount: solAmountChange,
+    }
   } catch (error) {
     console.error(`❌ Error analyzing transaction ${signature.slice(0, 8)}:`, error)
     return null
@@ -249,17 +273,30 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
 
   try {
     const signatures = (await Promise.race([
-      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 30 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 7000)),
+      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 20 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Signature fetch timeout")), 6000)),
     ])) as any[]
 
-    const recentSigs = signatures.slice(0, 15)
+    const recentSigs = signatures.slice(0, 10) // Analyze fewer but more thoroughly
     console.log(`🔍 Analyzing ${recentSigs.length} recent transactions`)
 
-    for (const sigInfo of recentSigs) {
-      const analysis = await analyzeTransactionVolume(connection, sigInfo.signature, mint)
-      if (analysis) {
-        volumeData.transactions.push(sigInfo.signature)
+    // Process transactions in parallel for speed
+    const analysisPromises = recentSigs.map(async (sigInfo) => {
+      try {
+        return await analyzeTransactionVolume(connection, sigInfo.signature, mint)
+      } catch (error) {
+        console.error(`Error analyzing ${sigInfo.signature.slice(0, 8)}:`, error)
+        return null
+      }
+    })
+
+    const analyses = await Promise.allSettled(analysisPromises)
+
+    for (let i = 0; i < analyses.length; i++) {
+      const result = analyses[i]
+      if (result.status === "fulfilled" && result.value) {
+        const analysis = result.value
+        volumeData.transactions.push(recentSigs[i].signature)
 
         if (analysis.isBuy) {
           volumeData.buyVolume += analysis.solAmount
@@ -270,7 +307,7 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
     }
 
     console.log(
-      `📊 Volume analysis: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL, Total transactions: ${volumeData.transactions.length}`,
+      `📊 Volume analysis: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL, Analyzed: ${volumeData.transactions.length} transactions`,
     )
   } catch (error) {
     console.error("Quick volume check error:", error)
