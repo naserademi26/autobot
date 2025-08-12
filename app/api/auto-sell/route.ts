@@ -176,30 +176,40 @@ async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percen
       (async () => {
         const volumeData = await quickVolumeCheck(connection, mint)
 
-        if (volumeData.buyVolume > volumeData.sellVolume) {
-          const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
+        const totalVolume = volumeData.buyVolume + volumeData.sellVolume
+        const hasSignificantActivity = totalVolume > 0.01 // At least 0.01 SOL total volume
+        const hasBuyActivity = volumeData.buyVolume > 0.005 // At least 0.005 SOL buy volume
 
-          console.log(`🚀 Buy volume exceeds sell volume by ${volumeDifference.toFixed(4)} SOL`)
+        console.log(
+          `📈 Volume analysis: Total: ${totalVolume.toFixed(4)} SOL, Buy: ${volumeData.buyVolume.toFixed(4)} SOL`,
+        )
+        console.log(`🎯 Triggers: Significant activity: ${hasSignificantActivity}, Buy activity: ${hasBuyActivity}`)
 
-          const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeDifference)
+        if (hasSignificantActivity && hasBuyActivity) {
+          console.log(`🚀 Auto-sell triggered! Buy volume: ${volumeData.buyVolume.toFixed(4)} SOL detected`)
+
+          const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeData.buyVolume)
           return {
             success: true,
             action: "sell_executed",
             volumeData,
             sellResult,
-            netBuyVolume: volumeDifference,
-            message: `Auto-sell executed: ${percentage}% of tokens sold`,
+            buyVolume: volumeData.buyVolume,
+            totalVolume,
+            message: `Auto-sell executed: ${percentage}% of tokens sold due to ${volumeData.buyVolume.toFixed(4)} SOL buy volume`,
           }
         } else {
           return {
             success: true,
             action: "no_sell",
             volumeData,
-            message: `No auto-sell: insufficient buy volume`,
+            totalVolume,
+            reason: hasSignificantActivity ? "insufficient_buy_volume" : "no_significant_activity",
+            message: `No auto-sell: ${!hasSignificantActivity ? "insufficient total volume" : "insufficient buy volume"}`,
           }
         }
       })(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout after 5 seconds")), 5000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout after 8 seconds")), 8000)),
     ])
 
     return result
@@ -224,11 +234,12 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
 
   try {
     const signatures = (await Promise.race([
-      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 10 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 2000)),
+      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 20 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 5000)),
     ])) as any[]
 
-    const recentSigs = signatures.slice(0, 5)
+    const recentSigs = signatures.slice(0, 10)
+    console.log(`🔍 Analyzing ${recentSigs.length} recent transactions`)
 
     for (const sigInfo of recentSigs) {
       const analysis = await analyzeTransactionVolume(connection, sigInfo.signature, mint)
@@ -244,7 +255,7 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
     }
 
     console.log(
-      `📊 Quick check: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL`,
+      `📊 Volume analysis: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL, Total transactions: ${volumeData.transactions.length}`,
     )
   } catch (error) {
     console.error("Quick volume check error:", error)
