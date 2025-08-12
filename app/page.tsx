@@ -169,6 +169,16 @@ export default function Home() {
     setSelected(s)
   }
 
+  const playBuySuccessSound = () => {
+    try {
+      const audio = new Audio("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Apple%20Pay%20sound%20effect-Y8Lva1pUiq0AXmNZMcNJvPv5OKtv5A.mp3")
+      audio.volume = 0.3
+      audio.play().catch(console.error)
+    } catch (error) {
+      console.error("Failed to play buy success sound:", error)
+    }
+  }
+
   async function buy() {
     setLoading(true)
     setLog(`🚀 Executing ultra-fast buy with all selected wallets simultaneously...`)
@@ -195,6 +205,10 @@ export default function Home() {
       clearTimeout(timeoutId)
       const j = await res.json()
       setLog(JSON.stringify(j, null, 2))
+
+      if (res.ok && j && !j.error) {
+        playBuySuccessSound()
+      }
     } catch (e: any) {
       if (e.name === "AbortError") {
         setLog(`Timeout: Operation took longer than 30 seconds`)
