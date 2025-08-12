@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { setLastPush } from "./auto-sell-tick"
+import { POST as sellHandler } from "../sell/route"
 
 const TradeSchema = z.object({
   ts: z.number(),
@@ -14,86 +14,17 @@ const IngestBodySchema = z.object({
   window_seconds: z.number().optional(),
 })
 
+let lastPush: {
+  buyers_usd: number
+  sellers_usd: number
+  at: number
+  window_seconds: number
+} | null = null
+
 let lastSellAt = 0
 const COOLDOWN_MS = Number(process.env.COOLDOWN_SECONDS ?? "0") * 1000
 const TRIGGER_MODE = (process.env.TRIGGER_MODE || "netflow").toLowerCase()
 const NET_FRACTION = Number(process.env.NET_FRACTION ?? "0.25")
-const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS ?? "120")
-
-async function getUsdPerBaseUnit(mint: string): Promise<number> {
-  const QUOTE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
-  const JUP_BASE = "https://quote-api.jup.ag"
-
-  const key = process.env.JUPITER_API_KEY || process.env.NEXT_PUBLIC_JUPITER_API_KEY || process.env.JUP_API_KEY
-  const headers = key
-    ? { "Content-Type": "application/json", "X-API-KEY": key }
-    : { "Content-Type": "application/json" }
-
-  const url = `${JUP_BASE}/v6/quote?inputMint=${mint}&outputMint=${QUOTE_MINT}&amount=1000000&slippageBps=50`
-  const res = await fetch(url, { cache: "no-store", headers })
-
-  if (!res.ok) return 0
-  const data = await res.json()
-  const route = data?.data?.[0]
-  if (!route) return 0
-
-  const outAmount = Number(route.outAmount)
-  const inAmount = Number(route.inAmount)
-  if (!outAmount || !inAmount) return 0
-
-  return outAmount / inAmount
-}
-
-async function tokensFromUsd(usd: number, mint: string): Promise<bigint> {
-  if (usd <= 0) return BigInt(0)
-  const usdcPerBase = await getUsdPerBaseUnit(mint)
-  if (usdcPerBase <= 0) return BigInt(0)
-  const baseUnits = Math.floor(usd / usdcPerBase)
-  return BigInt(baseUnits)
-}
-
-async function sendToExecutor(payload: any) {
-  const url = process.env.EXECUTOR_URL
-  const secret = process.env.EXECUTOR_SECRET
-
-  if (!url || !secret) {
-    // Fallback to internal sell handler if no external executor configured
-    const { POST: sellHandler } = await import("../sell/route")
-
-    const mockRequest = new Request("http://localhost:3000/api/sell", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mint: payload.mint,
-        privateKeys: payload.privateKeys,
-        percentage: payload.percentage || 25,
-        slippageBps: payload.slippageBps || 2000,
-      }),
-    })
-
-    const response = await sellHandler(mockRequest)
-    const result = await response.json()
-
-    return {
-      ok: response.ok,
-      status: response.status,
-      data: result,
-    }
-  }
-
-  // External executor call
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Auth": secret },
-    body: JSON.stringify(payload),
-  })
-
-  return {
-    ok: res.ok,
-    status: res.status,
-    data: await res.json(),
-  }
-}
 
 export default async function handler(req: Request) {
   if (req.method !== "POST") {
@@ -112,14 +43,12 @@ export default async function handler(req: Request) {
 
     // Handle aggregated data (netflow mode)
     if (w.buyers_usd !== undefined && w.sellers_usd !== undefined) {
-      const pushData = {
+      lastPush = {
         buyers_usd: w.buyers_usd,
         sellers_usd: w.sellers_usd,
         at: Date.now(),
-        window_seconds: w.window_seconds ?? WINDOW_SECONDS,
+        window_seconds: w.window_seconds ?? Number(process.env.WINDOW_SECONDS || 120),
       }
-
-      setLastPush(pushData)
     }
 
     // Handle individual trades (perbuy mode)
@@ -132,26 +61,24 @@ export default async function handler(req: Request) {
           if (trade.side !== "buy" || trade.usd <= 0) continue
           if (Date.now() - lastSellAt < COOLDOWN_MS) continue
 
-          const sellUsd = trade.usd * NET_FRACTION
-          const sellTokens = await tokensFromUsd(sellUsd, mintAddress)
+          // Calculate sell percentage based on buy amount
+          const sellPercentage = Math.min(NET_FRACTION * 100, 100)
 
-          if (sellTokens <= BigInt(0)) continue
+          // Execute immediate sell
+          const sellRequest = new Request("http://localhost:3000/api/sell", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mint: mintAddress,
+              privateKeys,
+              percentage: sellPercentage,
+              slippageBps: 2000, // 20% slippage for auto-sell
+            }),
+          })
 
-          const payload = {
-            action: "SELL",
-            mint: mintAddress,
-            privateKeys,
-            percentage: 25, // 25% of token balance
-            slippageBps: 2000,
-            reason: "perbuy",
-            buy_usd: trade.usd,
-            sell_usd: sellUsd,
-          }
-
-          const execRes = await sendToExecutor(payload)
-          if (execRes.ok) {
+          const sellResponse = await sellHandler(sellRequest)
+          if (sellResponse.ok) {
             lastSellAt = Date.now()
-            console.log(`✅ Perbuy sell executed for $${trade.usd} buy -> $${sellUsd.toFixed(2)} sell`)
           }
         }
       }
@@ -160,7 +87,7 @@ export default async function handler(req: Request) {
       let buyers = 0,
         sellers = 0
       const now = Date.now()
-      const windowMs = WINDOW_SECONDS * 1000
+      const windowMs = Number(process.env.WINDOW_SECONDS || 120) * 1000
 
       for (const trade of w.trades) {
         if (now - trade.ts > windowMs) continue
@@ -168,23 +95,15 @@ export default async function handler(req: Request) {
         else sellers += trade.usd
       }
 
-      setLastPush({
+      lastPush = {
         buyers_usd: buyers,
         sellers_usd: sellers,
         at: now,
-        window_seconds: WINDOW_SECONDS,
-      })
+        window_seconds: Number(process.env.WINDOW_SECONDS || 120),
+      }
     }
 
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        mode: TRIGGER_MODE,
-        message: w.trades
-          ? `Processed ${w.trades.length} trades in ${TRIGGER_MODE} mode`
-          : `Updated volume data: $${w.buyers_usd || 0} buy, $${w.sellers_usd || 0} sell`,
-      }),
-    )
+    return new Response(JSON.stringify({ ok: true, mode: TRIGGER_MODE }))
   } catch (error) {
     return new Response(
       JSON.stringify({
@@ -193,4 +112,8 @@ export default async function handler(req: Request) {
       { status: 500 },
     )
   }
+}
+
+export function readLastPush() {
+  return lastPush
 }
