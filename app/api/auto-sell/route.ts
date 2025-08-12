@@ -2,12 +2,85 @@ import type { NextRequest } from "next/server"
 import { Keypair } from "@solana/web3.js"
 import { Connection, PublicKey } from "@solana/web3.js"
 import bs58 from "bs58"
-import { POST as sellHandler } from "../sell/route"
+import { z } from "zod"
 
-interface VolumeData {
-  buyVolume: number
-  sellVolume: number
-  transactions: string[]
+const TradeSchema = z.object({
+  ts: z.number(),
+  side: z.enum(["buy", "sell"]),
+  usd: z.number().nonnegative(),
+})
+
+const BodySchema = z.object({
+  trades: z.array(TradeSchema).optional(),
+  mint: z.string().optional(),
+  privateKeys: z.array(z.string()).optional(),
+  percentage: z.number().optional(),
+  slippageBps: z.number().optional(),
+  mode: z.enum(["netflow", "perbuy"]).optional(),
+})
+
+// In-memory state for volume tracking
+let lastPush: { buyers_usd: number; sellers_usd: number; at: number; window_seconds: number } | null = null
+let lastSellAt = 0
+
+const NET_FRACTION = 0.25 // 25% of net volume
+const WINDOW_SECONDS = 120 // 2 minutes
+const COOLDOWN_MS = 0 // No cooldown by default
+
+async function getUsdPerBaseUnit(mint: string): Promise<number> {
+  const QUOTE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
+  const JUP_BASE = "https://quote-api.jup.ag"
+
+  const key = process.env.JUPITER_API_KEY || process.env.NEXT_PUBLIC_JUPITER_API_KEY || process.env.JUP_API_KEY
+  const headers = key
+    ? { "Content-Type": "application/json", "X-API-KEY": key }
+    : { "Content-Type": "application/json" }
+
+  const url = `${JUP_BASE}/v6/quote?inputMint=${mint}&outputMint=${QUOTE_MINT}&amount=1000000&slippageBps=50`
+  const res = await fetch(url, { cache: "no-store", headers })
+
+  if (!res.ok) return 0
+  const data = await res.json()
+  const route = data?.data?.[0]
+  if (!route) return 0
+
+  const outAmount = Number(route.outAmount)
+  const inAmount = Number(route.inAmount)
+  if (!outAmount || !inAmount) return 0
+
+  return outAmount / inAmount
+}
+
+async function tokensFromUsd(usd: number, mint: string): Promise<bigint> {
+  if (usd <= 0) return BigInt(0)
+  const usdcPerBase = await getUsdPerBaseUnit(mint)
+  if (usdcPerBase <= 0) return BigInt(0)
+  const baseUnits = Math.floor(usd / usdcPerBase)
+  return BigInt(baseUnits)
+}
+
+async function sendToExecutor(payload: any) {
+  // For now, use the existing sell handler as executor
+  // In production, this would call an external service
+  const { POST: sellHandler } = await import("../sell/route")
+
+  const mockRequest = {
+    json: async () => ({
+      mint: payload.mint,
+      privateKeys: payload.privateKeys,
+      percentage: payload.percentage || 25,
+      slippageBps: payload.slippageBps || 2000,
+    }),
+  } as any
+
+  const response = await sellHandler(mockRequest)
+  const result = await response.json()
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data: result,
+  }
 }
 
 async function analyzeTransactionVolume(
@@ -21,7 +94,7 @@ async function analyzeTransactionVolume(
         commitment: "confirmed",
         maxSupportedTransactionVersion: 0,
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 3000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Transaction timeout")), 1500)),
     ])) as any
 
     if (!tx?.meta || tx.meta.err) return null
@@ -84,7 +157,6 @@ async function analyzeTransactionVolume(
 
     return { isBuy, solAmount }
   } catch (error) {
-    console.error(`Error analyzing transaction ${signature}:`, error)
     return null
   }
 }
@@ -102,30 +174,30 @@ async function monitorVolumeWithEarlyDecision(
   }
 
   const startTime = Date.now()
-  const maxDuration = 10000
+  const maxDuration = 8000
   let lastSignature: string | undefined
   let consecutiveErrors = 0
   let checkCount = 0
 
   const absoluteTimeout = setTimeout(() => {
     console.log(`⏰ Auto-sell monitoring timed out after ${maxDuration / 1000} seconds`)
-  }, maxDuration + 1000)
+  }, maxDuration + 500)
 
   try {
-    while (Date.now() - startTime < maxDuration && consecutiveErrors < 3) {
+    while (Date.now() - startTime < maxDuration && consecutiveErrors < 2) {
       try {
         const signatures = (await Promise.race([
           connection.getSignaturesForAddress(new PublicKey(mint), {
-            limit: 50,
+            limit: 30,
             before: lastSignature,
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("getSignatures timeout")), 5000)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("getSignatures timeout")), 2000)),
         ])) as any[]
 
         consecutiveErrors = 0
         checkCount++
 
-        const signaturesSlice = signatures.slice(0, 20)
+        const signaturesSlice = signatures.slice(0, 15)
 
         for (const sigInfo of signaturesSlice) {
           if (volumeData.transactions.includes(sigInfo.signature)) continue
@@ -152,7 +224,7 @@ async function monitorVolumeWithEarlyDecision(
         const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
         const totalVolume = volumeData.buyVolume + volumeData.sellVolume
 
-        if (elapsedTime >= 3000 && totalVolume >= 0.05 && volumeDifference > 0.02) {
+        if (elapsedTime >= 2000 && totalVolume >= 0.02 && volumeDifference > 0.01) {
           console.log(`⚡ Early decision triggered after ${(elapsedTime / 1000).toFixed(1)}s`)
           console.log(`   Buy advantage: ${volumeDifference.toFixed(4)} SOL`)
           volumeData.earlyDecision = true
@@ -163,11 +235,11 @@ async function monitorVolumeWithEarlyDecision(
           lastSignature = signatures[signatures.length - 1].signature
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 500))
+        await new Promise((resolve) => setTimeout(resolve, 300))
       } catch (error) {
         consecutiveErrors++
-        console.error(`Error monitoring volume (attempt ${consecutiveErrors}/3):`, error)
-        await new Promise((resolve) => setTimeout(resolve, 1000))
+        console.error(`Error monitoring volume (attempt ${consecutiveErrors}/2):`, error)
+        await new Promise((resolve) => setTimeout(resolve, 500))
       }
     }
   } finally {
@@ -210,15 +282,18 @@ async function executeAutoSell(
         privateKeys,
         percentage,
         slippageBps,
-        limitWallets: Math.min(wallets.length, 20),
+        limitWallets: Math.min(wallets.length, 10),
       }),
     } as NextRequest
 
     console.log(`🔗 Calling sell handler for ${mint} to sell ${percentage}% of tokens`)
 
     const response = (await Promise.race([
-      sellHandler(mockRequest),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout")), 30000)),
+      (async () => {
+        const { POST: sellHandler } = await import("../sell/route")
+        return sellHandler(mockRequest)
+      })(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout")), 20000)),
     ])) as Response
 
     const result = await response.json()
@@ -287,7 +362,7 @@ async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percen
         }
       })(),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Auto-sell process timeout after 45 seconds")), 45000),
+        setTimeout(() => reject(new Error("Auto-sell process timeout after 30 seconds")), 30000),
       ),
     ])
 
@@ -302,36 +377,192 @@ async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percen
   }
 }
 
+interface VolumeData {
+  buyVolume: number
+  sellVolume: number
+  transactions: string[]
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { mint, privateKeys, percentage = 50, slippageBps = 2000 } = body
+    const parsed = BodySchema.safeParse(body)
 
-    if (!mint || !privateKeys || !Array.isArray(privateKeys)) {
-      return Response.json({ error: "Missing required fields: mint, privateKeys" }, { status: 400 })
+    if (!parsed.success) {
+      return Response.json({ error: "Invalid request body", details: parsed.error }, { status: 400 })
     }
 
-    const wallets: Keypair[] = []
-    for (const pk of privateKeys) {
-      try {
-        const secretKey = bs58.decode(pk)
-        const keypair = Keypair.fromSecretKey(secretKey)
-        wallets.push(keypair)
-      } catch (error) {
-        console.error(`Invalid private key: ${pk}`)
-        continue
+    const { trades, mint, privateKeys, percentage = 25, slippageBps = 2000, mode = "netflow" } = parsed.data
+
+    // Handle trade ingestion for volume tracking
+    if (trades && trades.length > 0) {
+      let buyers = 0,
+        sellers = 0
+      const now = Date.now()
+
+      for (const trade of trades) {
+        if (now - trade.ts > WINDOW_SECONDS * 1000) continue
+        if (trade.side === "buy") buyers += trade.usd
+        else sellers += trade.usd
       }
+
+      lastPush = { buyers_usd: buyers, sellers_usd: sellers, at: now, window_seconds: WINDOW_SECONDS }
+
+      // Immediate sell on each buy (perbuy mode)
+      if (mode === "perbuy" && mint && privateKeys) {
+        for (const trade of trades) {
+          if (trade.side !== "buy" || trade.usd <= 0) continue
+          if (Date.now() - lastSellAt < COOLDOWN_MS) continue
+
+          const sellTokens = await tokensFromUsd(trade.usd * NET_FRACTION, mint)
+          if (sellTokens <= BigInt(0)) continue
+
+          const payload = {
+            mint,
+            privateKeys,
+            percentage: 25, // 25% of token balance
+            slippageBps,
+            reason: "perbuy",
+            buy_usd: trade.usd,
+          }
+
+          const execRes = await sendToExecutor(payload)
+          if (execRes.ok) {
+            lastSellAt = Date.now()
+            console.log(`✅ Perbuy sell executed for $${trade.usd} buy`)
+          }
+        }
+      }
+
+      return Response.json({
+        success: true,
+        mode,
+        buyers_usd: buyers,
+        sellers_usd: sellers,
+        message: `Processed ${trades.length} trades in ${mode} mode`,
+      })
     }
 
-    if (wallets.length === 0) {
-      return Response.json({ error: "No valid wallets provided" }, { status: 400 })
+    // Handle netflow mode auto-sell
+    if (mode === "netflow" && mint && privateKeys) {
+      const pushed = lastPush
+      let buyers_usd = 0,
+        sellers_usd = 0
+
+      if (pushed && Date.now() - pushed.at <= pushed.window_seconds * 1000 + 2000) {
+        buyers_usd = pushed.buyers_usd
+        sellers_usd = pushed.sellers_usd
+      }
+
+      const net = buyers_usd - sellers_usd
+
+      if (net <= 0) {
+        return Response.json({
+          success: true,
+          action: "no_sell",
+          reason: "net non-positive",
+          net,
+          buyers_usd,
+          sellers_usd,
+        })
+      }
+
+      if (Date.now() - lastSellAt < COOLDOWN_MS) {
+        return Response.json({
+          success: true,
+          action: "no_sell",
+          reason: "cooldown",
+          net,
+        })
+      }
+
+      // Calculate sell amount as 25% of net positive volume
+      const sellUsd = net * NET_FRACTION
+      const sellTokens = await tokensFromUsd(sellUsd, mint)
+
+      if (sellTokens <= BigInt(0)) {
+        return Response.json({
+          success: true,
+          action: "no_sell",
+          reason: "sell amount too small",
+          net,
+        })
+      }
+
+      const payload = {
+        mint,
+        privateKeys,
+        percentage: 25, // 25% of token balance
+        slippageBps,
+        reason: "netflow",
+        net_usd: net,
+        sell_usd: sellUsd,
+      }
+
+      const execRes = await sendToExecutor(payload)
+
+      if (!execRes.ok) {
+        return Response.json(
+          {
+            success: false,
+            error: "Executor failed",
+            details: execRes.data,
+          },
+          { status: 500 },
+        )
+      }
+
+      lastSellAt = Date.now()
+
+      return Response.json({
+        success: true,
+        action: "sell_executed",
+        mode: "netflow",
+        net_usd: net,
+        sell_usd: sellUsd,
+        buyers_usd,
+        sellers_usd,
+        result: execRes.data,
+        message: `Auto-sell executed: 25% of $${net.toFixed(2)} net volume = $${sellUsd.toFixed(2)} worth of tokens sold`,
+      })
     }
 
-    const result = await startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+    // Fallback to original volume monitoring if no trades provided
+    if (!trades && mint && privateKeys) {
+      const wallets: Keypair[] = []
+      for (const pk of privateKeys) {
+        try {
+          const secretKey = bs58.decode(pk)
+          const keypair = Keypair.fromSecretKey(secretKey)
+          wallets.push(keypair)
+        } catch (error) {
+          console.error(`Invalid private key: ${pk}`)
+          continue
+        }
+      }
 
-    return Response.json(result)
+      if (wallets.length === 0) {
+        return Response.json({ error: "No valid wallets provided" }, { status: 400 })
+      }
+
+      const result = await startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+
+      return Response.json(result)
+    }
+
+    return Response.json(
+      { error: "Invalid request: provide trades for ingestion or mint+privateKeys for netflow mode" },
+      { status: 400 },
+    )
   } catch (error) {
     console.error("Auto-sell API error:", error)
-    return Response.json({ error: "Internal server error", details: error.message }, { status: 500 })
+    return Response.json(
+      {
+        success: false,
+        error: "Internal server error",
+        details: error.message,
+      },
+      { status: 500 },
+    )
   }
 }
