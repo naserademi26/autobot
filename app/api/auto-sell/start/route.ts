@@ -5,8 +5,8 @@ const autoSellState = {
   isRunning: false,
   config: null as any,
   wallets: [] as any[],
-  window: { trades: [], windowSec: 120, minUsd: 1 } as any,
-  metrics: { buys: 0, sells: 0, net: 0, priceUsd: 0 },
+  buyTransactions: [] as any[], // Store actual buy transactions from wallets
+  metrics: { totalBought: 0, totalSold: 0, avgBuyPrice: 0, currentPrice: 0, unrealizedPnL: 0 },
   intervals: [] as NodeJS.Timeout[],
 }
 
@@ -46,10 +46,13 @@ export async function POST(request: NextRequest) {
           keypair,
           publicKey: keypair.publicKey.toBase58(),
           cooldownUntil: 0,
-          lastBal: 0,
-          lastSig: "",
           balance: 0,
           tokenBalance: 0,
+          buyHistory: [], // Store buy transactions for this wallet
+          avgBuyPrice: 0,
+          totalBought: 0,
+          totalSold: 0,
+          lastTransactionSignature: "",
         })
       } catch (error) {
         console.error(`Failed to parse wallet ${i}:`, error)
@@ -63,11 +66,7 @@ export async function POST(request: NextRequest) {
     // Update global state
     autoSellState.config = config
     autoSellState.wallets = wallets
-    autoSellState.window = {
-      trades: [],
-      windowSec: config.windowSeconds,
-      minUsd: config.minTradeUsd,
-    }
+    autoSellState.buyTransactions = []
     autoSellState.isRunning = true
 
     // Start monitoring and execution intervals
@@ -89,18 +88,17 @@ function startAutoSellEngine() {
   autoSellState.intervals.forEach((interval) => clearInterval(interval))
   autoSellState.intervals = []
 
-  // Trade monitoring interval (every 15 seconds - DexScreener fallback)
-  const tradeMonitorInterval = setInterval(async () => {
+  const transactionMonitorInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
 
     try {
-      await monitorTrades()
+      await monitorWalletTransactions()
     } catch (error) {
-      console.error("Trade monitoring error:", error)
+      console.error("Transaction monitoring error:", error)
     }
-  }, 15000)
+  }, 10000) // Check every 10 seconds
 
-  // Auto-sell execution interval (every 5 seconds)
+  // Auto-sell execution interval (every 15 seconds)
   const executionInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
 
@@ -109,83 +107,248 @@ function startAutoSellEngine() {
     } catch (error) {
       console.error("Auto-sell execution error:", error)
     }
-  }, 5000)
+  }, 15000)
 
-  autoSellState.intervals.push(tradeMonitorInterval, executionInterval)
+  autoSellState.intervals.push(transactionMonitorInterval, executionInterval)
 }
 
-async function monitorTrades() {
+async function monitorWalletTransactions() {
   try {
-    // Use DexScreener to estimate net USD activity
-    const response = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${autoSellState.config.mint}`)
-    const data = await response.json()
+    const { Connection, PublicKey } = await import("@solana/web3.js")
 
-    if (!Array.isArray(data) || data.length === 0) return
+    const connection = new Connection(
+      process.env.NEXT_PUBLIC_RPC_URL ||
+        process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+        "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+      { commitment: "confirmed" },
+    )
 
-    const pairs = data.sort((a: any, b: any) => (b?.liquidity?.usd || 0) - (a?.liquidity?.usd || 0))
-    const pair = pairs[0] || {}
+    for (const wallet of autoSellState.wallets) {
+      try {
+        // Get recent transactions for this wallet
+        const signatures = await connection.getSignaturesForAddress(
+          wallet.keypair.publicKey,
+          { limit: 10 },
+          "confirmed",
+        )
 
-    const buys = Number(pair?.txns?.m5?.buys || 0)
-    const sells = Number(pair?.txns?.m5?.sells || 0)
-    const vol5 = Number((pair?.volume && (pair.volume.m5 ?? pair.volume.h1)) || 0)
-    const priceUsd = Number(pair?.priceUsd || 0)
+        // Check for new transactions since last check
+        for (const sigInfo of signatures) {
+          if (sigInfo.signature === wallet.lastTransactionSignature) break
 
-    if (!vol5 || (!buys && !sells)) return
+          // Get transaction details
+          const tx = await connection.getParsedTransaction(sigInfo.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0,
+          })
 
-    // Calculate net activity and add to window
-    const imbalance = (buys - sells) / Math.max(1, buys + sells)
-    const net5 = vol5 * imbalance
-    const net2 = net5 * (2 / 5) // Scale to 2-minute window
+          if (!tx || tx.meta?.err) continue
 
-    if (Math.abs(net2) >= autoSellState.window.minUsd) {
-      const side = net2 >= 0 ? "buy" : "sell"
-      pushAndPrune(autoSellState.window, {
-        side,
-        usd: Math.abs(net2),
-        ts: Date.now(),
-      })
+          const tokenPurchase = analyzeTransactionForTokenPurchase(tx, autoSellState.config.mint, wallet.publicKey)
+
+          if (tokenPurchase) {
+            // Record the buy transaction
+            const buyRecord = {
+              signature: sigInfo.signature,
+              timestamp: sigInfo.blockTime ? sigInfo.blockTime * 1000 : Date.now(),
+              walletAddress: wallet.publicKey,
+              solSpent: tokenPurchase.solSpent,
+              tokensReceived: tokenPurchase.tokensReceived,
+              pricePerToken: tokenPurchase.solSpent / tokenPurchase.tokensReceived,
+            }
+
+            wallet.buyHistory.push(buyRecord)
+            autoSellState.buyTransactions.push(buyRecord)
+
+            // Update wallet metrics
+            wallet.totalBought += tokenPurchase.tokensReceived
+            wallet.avgBuyPrice =
+              wallet.buyHistory.reduce((sum, buy) => sum + buy.pricePerToken, 0) / wallet.buyHistory.length
+
+            console.log(
+              `[BUY DETECTED] ${wallet.name}: ${tokenPurchase.tokensReceived.toFixed(4)} tokens for ${tokenPurchase.solSpent.toFixed(4)} SOL`,
+            )
+          }
+        }
+
+        // Update last transaction signature
+        if (signatures.length > 0) {
+          wallet.lastTransactionSignature = signatures[0].signature
+        }
+      } catch (error) {
+        console.error(`Error monitoring wallet ${wallet.name}:`, error)
+      }
     }
 
-    // Update price
-    autoSellState.metrics.priceUsd = priceUsd
+    // Update global metrics
+    updateGlobalMetrics()
   } catch (error) {
-    console.error("Trade monitoring error:", error)
+    console.error("Wallet transaction monitoring error:", error)
+  }
+}
+
+function analyzeTransactionForTokenPurchase(tx: any, targetMint: string, walletAddress: string) {
+  try {
+    if (!tx.meta || !tx.transaction) return null
+
+    const preBalances = tx.meta.preBalances
+    const postBalances = tx.meta.postBalances
+    const accountKeys = tx.transaction.message.accountKeys
+
+    // Find wallet's SOL balance change (should decrease for a buy)
+    let walletIndex = -1
+    for (let i = 0; i < accountKeys.length; i++) {
+      if (accountKeys[i].pubkey === walletAddress) {
+        walletIndex = i
+        break
+      }
+    }
+
+    if (walletIndex === -1) return null
+
+    const solChange = (postBalances[walletIndex] - preBalances[walletIndex]) / 1e9
+
+    // If SOL increased or stayed same, this wasn't a buy
+    if (solChange >= -0.001) return null // Allow for small fees
+
+    // Look for token account changes
+    const tokenChanges =
+      tx.meta.postTokenBalances?.filter(
+        (balance: any) => balance.mint === targetMint && balance.owner === walletAddress,
+      ) || []
+
+    const preTokenBalances =
+      tx.meta.preTokenBalances?.filter(
+        (balance: any) => balance.mint === targetMint && balance.owner === walletAddress,
+      ) || []
+
+    if (tokenChanges.length === 0) return null
+
+    const postTokenAmount = tokenChanges[0]?.uiTokenAmount?.uiAmount || 0
+    const preTokenAmount = preTokenBalances[0]?.uiTokenAmount?.uiAmount || 0
+    const tokensReceived = postTokenAmount - preTokenAmount
+
+    if (tokensReceived <= 0) return null
+
+    return {
+      solSpent: Math.abs(solChange),
+      tokensReceived,
+    }
+  } catch (error) {
+    console.error("Error analyzing transaction:", error)
+    return null
+  }
+}
+
+function updateGlobalMetrics() {
+  const totalBought = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.totalBought, 0)
+  const totalSold = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.totalSold, 0)
+
+  // Calculate weighted average buy price
+  let totalValue = 0
+  let totalTokens = 0
+
+  for (const wallet of autoSellState.wallets) {
+    for (const buy of wallet.buyHistory) {
+      totalValue += buy.solSpent
+      totalTokens += buy.tokensReceived
+    }
+  }
+
+  const avgBuyPrice = totalTokens > 0 ? totalValue / totalTokens : 0
+
+  autoSellState.metrics = {
+    totalBought,
+    totalSold,
+    avgBuyPrice,
+    currentPrice: autoSellState.metrics.currentPrice, // Keep current price from price updates
+    unrealizedPnL: 0, // Will be calculated when we get current price
   }
 }
 
 async function executeAutoSell() {
   try {
-    // Calculate net position
-    const { buys, sells, net } = netUsd(autoSellState.window)
-    autoSellState.metrics = { buys, sells, net, priceUsd: autoSellState.metrics.priceUsd }
+    // Update current token price
+    await updateCurrentPrice()
 
-    if (net <= 0 || autoSellState.metrics.priceUsd <= 0) return
+    const totalTokensHeld = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
 
-    const targetUsd = net * autoSellState.config.sellFractionOfNetUsd
-    const sellTokens = targetUsd / autoSellState.metrics.priceUsd
+    if (totalTokensHeld <= 0) {
+      console.log("[AUTO-SELL] No tokens held, skipping sell check")
+      return
+    }
 
-    // Execute sells for eligible wallets
+    // Calculate profit potential
+    const avgBuyPrice = autoSellState.metrics.avgBuyPrice
+    const currentPrice = autoSellState.metrics.currentPrice
+
+    if (avgBuyPrice <= 0 || currentPrice <= 0) {
+      console.log("[AUTO-SELL] Invalid prices, skipping sell check")
+      return
+    }
+
+    const profitPercentage = ((currentPrice - avgBuyPrice) / avgBuyPrice) * 100
+
+    const minProfitThreshold = autoSellState.config.minProfitPercent || 5 // 5% minimum profit
+
+    if (profitPercentage < minProfitThreshold) {
+      console.log(`[AUTO-SELL] Not profitable enough: ${profitPercentage.toFixed(2)}% < ${minProfitThreshold}%`)
+      return
+    }
+
+    console.log(`[AUTO-SELL] Profitable opportunity: ${profitPercentage.toFixed(2)}% profit`)
+
+    // Execute sells for eligible wallets that have tokens
     for (const wallet of autoSellState.wallets) {
       if (Date.now() < wallet.cooldownUntil) continue
+      if (wallet.tokenBalance <= 0) continue
 
-      // Update wallet balances
+      // Update wallet balances first
       await updateWalletBalances(wallet)
 
-      const toSell = Math.min(sellTokens, wallet.tokenBalance)
-      if (toSell <= 0) continue
+      if (wallet.tokenBalance <= 0) continue
+
+      const sellPercentage = autoSellState.config.sellPercentage || 25 // Default 25%
+      const tokensToSell = (wallet.tokenBalance * sellPercentage) / 100
+
+      if (tokensToSell < 0.000001) continue // Minimum sell amount
 
       try {
-        const signature = await executeSell(wallet, toSell)
-        wallet.lastSig = signature
+        const signature = await executeSell(wallet, tokensToSell)
+        wallet.lastTransactionSignature = signature
         wallet.cooldownUntil = Date.now() + autoSellState.config.cooldownSeconds * 1000
+        wallet.totalSold += tokensToSell
 
-        console.log(`[AUTO-SELL] ${wallet.name} sold ${toSell.toFixed(4)} tokens, sig: ${signature}`)
+        console.log(
+          `[AUTO-SELL] ${wallet.name} sold ${tokensToSell.toFixed(4)} tokens for ${profitPercentage.toFixed(2)}% profit, sig: ${signature}`,
+        )
       } catch (error) {
         console.error(`[AUTO-SELL ERROR] ${wallet.name}:`, error)
       }
     }
   } catch (error) {
     console.error("Auto-sell execution error:", error)
+  }
+}
+
+async function updateCurrentPrice() {
+  try {
+    const response = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${autoSellState.config.mint}`)
+    const data = await response.json()
+
+    if (Array.isArray(data) && data.length > 0) {
+      const pairs = data.sort((a: any, b: any) => (b?.liquidity?.usd || 0) - (a?.liquidity?.usd || 0))
+      const pair = pairs[0]
+      const priceUsd = Number(pair?.priceUsd || 0)
+
+      if (priceUsd > 0) {
+        // Convert USD price to SOL price (approximate)
+        const solPriceUsd = 100 // Approximate SOL price, could fetch this too
+        autoSellState.metrics.currentPrice = priceUsd / solPriceUsd
+      }
+    }
+  } catch (error) {
+    console.error("Error updating current price:", error)
   }
 }
 
@@ -241,12 +404,12 @@ async function executeSell(wallet: any, amount: number) {
 
   // Get Jupiter quote
   const jupiterBase = process.env.JUPITER_BASE || "https://quote-api.jup.ag"
-  const quoteMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
+  const outputMint = "So11111111111111111111111111111111111111112" // SOL
 
   const quoteResponse = await axios.default.get(`${jupiterBase}/v6/quote`, {
     params: {
       inputMint: autoSellState.config.mint,
-      outputMint: quoteMint,
+      outputMint: outputMint,
       amount: amountInAtoms,
       slippageBps: autoSellState.config.slippageBps,
     },
@@ -291,31 +454,6 @@ async function executeSell(wallet: any, amount: number) {
   const signature = await connection.sendTransaction(tx, { skipPreflight: true })
   await connection.confirmTransaction(signature, "confirmed")
   return signature
-}
-
-// Utility functions
-function pushAndPrune(window: any, trade: any) {
-  if (trade.usd >= window.minUsd) {
-    window.trades.push(trade)
-  }
-
-  const cutoff = Date.now() - window.windowSec * 1000
-  while (window.trades.length && window.trades[0].ts < cutoff) {
-    window.trades.shift()
-  }
-}
-
-function netUsd(window: any) {
-  let buys = 0,
-    sells = 0
-  for (const trade of window.trades) {
-    if (trade.side === "buy") {
-      buys += trade.usd
-    } else {
-      sells += trade.usd
-    }
-  }
-  return { buys, sells, net: buys - sells }
 }
 
 // Export the state for status endpoint

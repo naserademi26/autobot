@@ -7,14 +7,18 @@ export async function GET() {
       isRunning: autoSellState.isRunning,
       config: autoSellState.config,
       metrics: autoSellState.metrics,
-      recentTrades: autoSellState.window.trades.slice(-20), // Last 20 trades
+      recentBuyTransactions: autoSellState.buyTransactions.slice(-20), // Last 20 actual buy transactions
       walletStatus: autoSellState.wallets.map((wallet) => ({
         name: wallet.name,
         publicKey: wallet.publicKey,
         balance: wallet.balance || 0,
         tokenBalance: wallet.tokenBalance || 0,
         cooldownUntil: wallet.cooldownUntil || 0,
-        lastSig: wallet.lastSig || "",
+        lastTransactionSignature: wallet.lastTransactionSignature || "",
+        totalBought: wallet.totalBought || 0,
+        totalSold: wallet.totalSold || 0,
+        avgBuyPrice: wallet.avgBuyPrice || 0,
+        buyTransactionCount: wallet.buyHistory?.length || 0,
       })),
     })
   } catch (error) {

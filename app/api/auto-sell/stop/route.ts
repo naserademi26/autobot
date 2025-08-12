@@ -17,8 +17,8 @@ export async function POST() {
     // Reset state
     autoSellState.config = null
     autoSellState.wallets = []
-    autoSellState.window = { trades: [], windowSec: 120, minUsd: 1 }
-    autoSellState.metrics = { buys: 0, sells: 0, net: 0, priceUsd: 0 }
+    autoSellState.buyTransactions = []
+    autoSellState.metrics = { totalBought: 0, totalSold: 0, avgBuyPrice: 0, currentPrice: 0, unrealizedPnL: 0 }
 
     return NextResponse.json({
       success: true,

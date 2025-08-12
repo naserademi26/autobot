@@ -15,12 +15,12 @@ import {
   Play,
   Pause,
   Settings,
-  TrendingUp,
   TrendingDown,
   Activity,
   DollarSign,
   Clock,
   Target,
+  ShoppingCart,
 } from "lucide-react"
 
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
@@ -33,26 +33,29 @@ interface TokenInfo {
 
 interface AutoSellConfig {
   mint: string
-  windowSeconds: number
-  minTradeUsd: number
-  sellFractionOfNetUsd: number
   cooldownSeconds: number
   slippageBps: number
+  sellPercentage: number // Percentage of holdings to sell when profitable
+  minProfitPercent: number // Minimum profit percentage to trigger sell
 }
 
 interface AutoSellStatus {
   isRunning: boolean
   config: AutoSellConfig | null
   metrics: {
-    buys: number
-    sells: number
-    net: number
-    priceUsd: number
+    totalBought: number
+    totalSold: number
+    avgBuyPrice: number
+    currentPrice: number
+    unrealizedPnL: number
   }
-  recentTrades: Array<{
-    side: "buy" | "sell"
-    usd: number
+  recentBuyTransactions: Array<{
+    signature: string
     timestamp: number
+    walletAddress: string
+    solSpent: number
+    tokensReceived: number
+    pricePerToken: number
   }>
   walletStatus: Array<{
     name: string
@@ -60,7 +63,11 @@ interface AutoSellStatus {
     balance: number
     tokenBalance: number
     cooldownUntil: number
-    lastSig: string
+    lastTransactionSignature: string
+    totalBought: number
+    totalSold: number
+    avgBuyPrice: number
+    buyTransactionCount: number
   }>
 }
 
@@ -102,22 +109,20 @@ export default function AutoSellDashboard() {
   const mint = useMemo(() => sanitizeMintInput(mintRaw), [mintRaw])
   const [token, setToken] = useState<TokenInfo>({})
 
-  // Auto-sell configuration
   const [config, setConfig] = useState<AutoSellConfig>({
     mint: "",
-    windowSeconds: 120,
-    minTradeUsd: 1,
-    sellFractionOfNetUsd: 0.25,
     cooldownSeconds: 30,
     slippageBps: 100,
+    sellPercentage: 25, // Sell 25% of holdings when profitable
+    minProfitPercent: 5, // Minimum 5% profit to trigger sell
   })
 
   // Auto-sell status
   const [status, setStatus] = useState<AutoSellStatus>({
     isRunning: false,
     config: null,
-    metrics: { buys: 0, sells: 0, net: 0, priceUsd: 0 },
-    recentTrades: [],
+    metrics: { totalBought: 0, totalSold: 0, avgBuyPrice: 0, currentPrice: 0, unrealizedPnL: 0 },
+    recentBuyTransactions: [],
     walletStatus: [],
   })
 
@@ -322,7 +327,7 @@ export default function AutoSellDashboard() {
       <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold gradient-text">🤖 Solana Auto-Sell Engine</h1>
-          <p className="text-slate-400 text-sm">Intelligent trade monitoring with automatic sell execution</p>
+          <p className="text-slate-400 text-sm">Tracks your actual buy transactions and sells when profitable</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
@@ -435,36 +440,30 @@ export default function AutoSellDashboard() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label>Window (seconds)</Label>
+                  <Label>Sell Percentage</Label>
                   <Input
                     type="number"
-                    value={config.windowSeconds}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, windowSeconds: Number(e.target.value) }))}
+                    min="1"
+                    max="100"
+                    value={config.sellPercentage}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, sellPercentage: Number(e.target.value) }))}
                   />
+                  <p className="text-xs text-slate-400 mt-1">% of holdings to sell</p>
                 </div>
                 <div>
-                  <Label>Min Trade USD</Label>
+                  <Label>Min Profit %</Label>
                   <Input
                     type="number"
                     step="0.1"
-                    value={config.minTradeUsd}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, minTradeUsd: Number(e.target.value) }))}
+                    min="0"
+                    value={config.minProfitPercent}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, minProfitPercent: Number(e.target.value) }))}
                   />
+                  <p className="text-xs text-slate-400 mt-1">Minimum profit to sell</p>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <Label>Sell Fraction</Label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="1"
-                    value={config.sellFractionOfNetUsd}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, sellFractionOfNetUsd: Number(e.target.value) }))}
-                  />
-                </div>
                 <div>
                   <Label>Cooldown (sec)</Label>
                   <Input
@@ -473,16 +472,15 @@ export default function AutoSellDashboard() {
                     onChange={(e) => setConfig((prev) => ({ ...prev, cooldownSeconds: Number(e.target.value) }))}
                   />
                 </div>
-              </div>
-
-              <div>
-                <Label>Slippage (bps)</Label>
-                <Input
-                  type="number"
-                  value={config.slippageBps}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
-                />
-                <p className="text-xs text-slate-400 mt-1">100 bps = 1%</p>
+                <div>
+                  <Label>Slippage (bps)</Label>
+                  <Input
+                    type="number"
+                    value={config.slippageBps}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
+                  />
+                  <p className="text-xs text-slate-400 mt-1">100 bps = 1%</p>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -513,8 +511,8 @@ export default function AutoSellDashboard() {
 
               {status.config && (
                 <div className="text-xs text-slate-400 space-y-1">
-                  <div>Window: {status.config.windowSeconds}s</div>
-                  <div>Sell Fraction: {(status.config.sellFractionOfNetUsd * 100).toFixed(1)}%</div>
+                  <div>Sell: {status.config.sellPercentage}% when profitable</div>
+                  <div>Min Profit: {status.config.minProfitPercent}%</div>
                   <div>Cooldown: {status.config.cooldownSeconds}s</div>
                 </div>
               )}
@@ -524,73 +522,71 @@ export default function AutoSellDashboard() {
 
         {/* Monitoring Dashboard */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Metrics Overview */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Card className="bg-green-900/20 border-green-600/50">
               <CardContent className="p-4 text-center">
-                <TrendingUp className="w-8 h-8 mx-auto mb-2 text-green-400" />
-                <div className="text-2xl font-bold text-green-400">${status.metrics.buys.toFixed(2)}</div>
-                <div className="text-sm text-green-300">Buys (Window)</div>
+                <ShoppingCart className="w-8 h-8 mx-auto mb-2 text-green-400" />
+                <div className="text-2xl font-bold text-green-400">{status.metrics.totalBought.toFixed(2)}</div>
+                <div className="text-sm text-green-300">Tokens Bought</div>
               </CardContent>
             </Card>
 
             <Card className="bg-red-900/20 border-red-600/50">
               <CardContent className="p-4 text-center">
                 <TrendingDown className="w-8 h-8 mx-auto mb-2 text-red-400" />
-                <div className="text-2xl font-bold text-red-400">${status.metrics.sells.toFixed(2)}</div>
-                <div className="text-sm text-red-300">Sells (Window)</div>
+                <div className="text-2xl font-bold text-red-400">{status.metrics.totalSold.toFixed(2)}</div>
+                <div className="text-sm text-red-300">Tokens Sold</div>
               </CardContent>
             </Card>
 
             <Card className="bg-blue-900/20 border-blue-600/50">
               <CardContent className="p-4 text-center">
                 <DollarSign className="w-8 h-8 mx-auto mb-2 text-blue-400" />
-                <div className="text-2xl font-bold text-blue-400">${status.metrics.net.toFixed(2)}</div>
-                <div className="text-sm text-blue-300">Net Position</div>
+                <div className="text-2xl font-bold text-blue-400">{status.metrics.avgBuyPrice.toFixed(6)}</div>
+                <div className="text-sm text-blue-300">Avg Buy Price (SOL)</div>
               </CardContent>
             </Card>
 
             <Card className="bg-yellow-900/20 border-yellow-600/50">
               <CardContent className="p-4 text-center">
                 <Activity className="w-8 h-8 mx-auto mb-2 text-yellow-400" />
-                <div className="text-2xl font-bold text-yellow-400">${status.metrics.priceUsd.toFixed(6)}</div>
-                <div className="text-sm text-yellow-300">Token Price</div>
+                <div className="text-2xl font-bold text-yellow-400">{status.metrics.currentPrice.toFixed(6)}</div>
+                <div className="text-sm text-yellow-300">Current Price (SOL)</div>
               </CardContent>
             </Card>
           </div>
 
-          {/* Recent Trades */}
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Activity className="w-5 h-5" />
-                Recent Trades (Last {config.windowSeconds}s)
+                <ShoppingCart className="w-5 h-5" />
+                Your Buy Transactions
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {status.recentTrades.length === 0 ? (
+              {status.recentBuyTransactions.length === 0 ? (
                 <div className="text-center py-8 text-slate-400">
-                  <Activity className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>No trades detected yet</p>
-                  <p className="text-sm">Monitoring for trade activity...</p>
+                  <ShoppingCart className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>No buy transactions detected yet</p>
+                  <p className="text-sm">System will track your actual token purchases</p>
                 </div>
               ) : (
                 <div className="space-y-2 max-h-60 overflow-auto">
-                  {status.recentTrades.map((trade, idx) => (
+                  {status.recentBuyTransactions.map((tx, idx) => (
                     <div key={idx} className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
                       <div className="flex items-center gap-3">
-                        {trade.side === "buy" ? (
-                          <TrendingUp className="w-4 h-4 text-green-400" />
-                        ) : (
-                          <TrendingDown className="w-4 h-4 text-red-400" />
-                        )}
-                        <span className={`font-semibold ${trade.side === "buy" ? "text-green-400" : "text-red-400"}`}>
-                          {trade.side.toUpperCase()}
-                        </span>
+                        <ShoppingCart className="w-4 h-4 text-green-400" />
+                        <div>
+                          <div className="font-mono text-xs text-slate-300">
+                            {tx.walletAddress.slice(0, 8)}...{tx.walletAddress.slice(-4)}
+                          </div>
+                          <div className="text-xs text-slate-400">{new Date(tx.timestamp).toLocaleTimeString()}</div>
+                        </div>
                       </div>
                       <div className="text-right">
-                        <div className="font-mono text-white">${trade.usd.toFixed(2)}</div>
-                        <div className="text-xs text-slate-400">{new Date(trade.timestamp).toLocaleTimeString()}</div>
+                        <div className="font-mono text-white text-sm">{tx.tokensReceived.toFixed(2)} tokens</div>
+                        <div className="font-mono text-slate-400 text-xs">{tx.solSpent.toFixed(4)} SOL</div>
+                        <div className="font-mono text-blue-400 text-xs">{tx.pricePerToken.toFixed(8)} SOL/token</div>
                       </div>
                     </div>
                   ))}
@@ -599,12 +595,11 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          {/* Wallet Status */}
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Wallet className="w-5 h-5" />
-                Wallet Status
+                Wallet Status & Trading History
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -633,7 +628,7 @@ export default function AutoSellDashboard() {
                           )}
                         </Badge>
                       </div>
-                      <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div className="grid grid-cols-2 gap-4 text-sm mb-2">
                         <div>
                           <span className="text-slate-400">SOL: </span>
                           <span className="text-white font-mono">{wallet.balance.toFixed(4)}</span>
@@ -643,10 +638,24 @@ export default function AutoSellDashboard() {
                           <span className="text-white font-mono">{wallet.tokenBalance.toFixed(2)}</span>
                         </div>
                       </div>
-                      {wallet.lastSig && (
+                      <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div className="bg-green-900/20 p-2 rounded text-center">
+                          <div className="text-green-400 font-mono">{wallet.totalBought.toFixed(2)}</div>
+                          <div className="text-green-300">Bought</div>
+                        </div>
+                        <div className="bg-red-900/20 p-2 rounded text-center">
+                          <div className="text-red-400 font-mono">{wallet.totalSold.toFixed(2)}</div>
+                          <div className="text-red-300">Sold</div>
+                        </div>
+                        <div className="bg-blue-900/20 p-2 rounded text-center">
+                          <div className="text-blue-400 font-mono">{wallet.buyTransactionCount}</div>
+                          <div className="text-blue-300">Buys</div>
+                        </div>
+                      </div>
+                      {wallet.avgBuyPrice > 0 && (
                         <div className="mt-2 text-xs">
-                          <span className="text-slate-400">Last TX: </span>
-                          <span className="text-blue-400 font-mono">{wallet.lastSig.slice(0, 8)}...</span>
+                          <span className="text-slate-400">Avg Buy Price: </span>
+                          <span className="text-blue-400 font-mono">{wallet.avgBuyPrice.toFixed(8)} SOL</span>
                         </div>
                       )}
                     </div>
@@ -663,7 +672,8 @@ export default function AutoSellDashboard() {
             </CardHeader>
             <CardContent>
               <pre className="text-xs whitespace-pre-wrap bg-black/30 p-4 rounded-lg max-h-40 overflow-auto">
-                {log || "System ready. Configure settings and start the auto-sell engine."}
+                {log ||
+                  "System ready. The auto-sell engine will track your actual buy transactions and sell when profitable."}
               </pre>
             </CardContent>
           </Card>
