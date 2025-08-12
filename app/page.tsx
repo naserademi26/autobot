@@ -12,6 +12,26 @@ interface TokenInfo {
   source?: "jup" | "pump" | "unknown"
 }
 
+interface AutoSellConfig {
+  windowSeconds: number
+  minTradeUsd: number
+  sellFractionOfNet: number
+  cooldownSeconds: number
+  slippageBps: number
+}
+
+interface AutoSellStatus {
+  isRunning: boolean
+  currentWindow: {
+    buys: number
+    sells: number
+    net: number
+    priceUsd: number
+  }
+  lastActivity: string
+  totalSells: number
+}
+
 const ENDPOINT =
   process.env.NEXT_PUBLIC_RPC_URL ||
   process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
@@ -42,20 +62,29 @@ export default function Home() {
   const [connected, setConnected] = useState<VaultEntry[]>([])
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [balances, setBalances] = useState<Record<string, number>>({})
+  const [tokenBalances, setTokenBalances] = useState<Record<string, number>>({})
   const [balancesLoading, setBalancesLoading] = useState(false)
 
   const [mintRaw, setMintRaw] = useState<string>("")
   const mint = useMemo(() => sanitizeMintInput(mintRaw), [mintRaw])
   const [token, setToken] = useState<TokenInfo>({})
 
-  const [activeTab, setActiveTab] = useState<"buy" | "sell">("buy")
-  const [buyPerc, setBuyPerc] = useState<number>(50)
-  const [sellPerc, setSellPerc] = useState<number>(100)
-  const [slippageBps, setSlippageBps] = useState<number>(2000)
+  const [autoSellConfig, setAutoSellConfig] = useState<AutoSellConfig>({
+    windowSeconds: 120,
+    minTradeUsd: 1,
+    sellFractionOfNet: 0.25,
+    cooldownSeconds: 30,
+    slippageBps: 2000,
+  })
 
-  const [loading, setLoading] = useState(false)
+  const [autoSellStatus, setAutoSellStatus] = useState<AutoSellStatus>({
+    isRunning: false,
+    currentWindow: { buys: 0, sells: 0, net: 0, priceUsd: 0 },
+    lastActivity: "Never",
+    totalSells: 0,
+  })
+
   const [log, setLog] = useState<string>("")
-
   const refreshId = useRef(0)
 
   useEffect(() => {
@@ -134,11 +163,15 @@ export default function Home() {
     const pubkeys = connected.map((w) => w.pubkey)
     if (pubkeys.length === 0) {
       setBalances({})
+      setTokenBalances({})
       return
     }
     setBalancesLoading(true)
     try {
-      const next: Record<string, number> = {}
+      const nextSol: Record<string, number> = {}
+      const nextToken: Record<string, number> = {}
+
+      // Get SOL balances
       const chunkSize = 99
       for (let i = 0; i < pubkeys.length; i += chunkSize) {
         const slice = pubkeys.slice(i, i + chunkSize)
@@ -149,11 +182,32 @@ export default function Home() {
         infos.forEach((info, idx) => {
           const key = slice[idx]
           const lamports = info?.lamports ?? 0
-          next[key] = lamports / 1e9
+          nextSol[key] = lamports / 1e9
         })
         if (cur !== refreshId.current) return
       }
-      if (cur === refreshId.current) setBalances(next)
+
+      // Get token balances if mint is set
+      if (mint) {
+        try {
+          const res = await fetch("/api/token-balances", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mint, wallets: pubkeys }),
+          })
+          if (res.ok) {
+            const tokenData = await res.json()
+            Object.assign(nextToken, tokenData.balances || {})
+          }
+        } catch (e) {
+          console.error("Failed to fetch token balances:", e)
+        }
+      }
+
+      if (cur === refreshId.current) {
+        setBalances(nextSol)
+        setTokenBalances(nextToken)
+      }
     } finally {
       if (cur === refreshId.current) setBalancesLoading(false)
     }
@@ -161,7 +215,7 @@ export default function Home() {
 
   useEffect(() => {
     void refreshBalances()
-  }, [connected, connection])
+  }, [connected, connection, mint])
 
   function toggleAll(v: boolean) {
     const s: Record<string, boolean> = {}
@@ -169,93 +223,79 @@ export default function Home() {
     setSelected(s)
   }
 
-  const playBuySuccessSound = () => {
-    try {
-      const audio = new Audio("https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Apple%20Pay%20sound%20effect-Y8Lva1pUiq0AXmNZMcNJvPv5OKtv5A.mp3")
-      audio.volume = 0.3
-      audio.play().catch(console.error)
-    } catch (error) {
-      console.error("Failed to play buy success sound:", error)
+  async function startAutoSell() {
+    if (!mint || Object.values(selected).every((v) => !v)) {
+      setLog("❌ Please select a token and wallets first")
+      return
     }
-  }
-
-  async function buy() {
-    setLoading(true)
-    setLog(`🚀 Executing ultra-fast buy with all selected wallets simultaneously...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 30000)
 
-      const res = await fetch("/api/snipe", {
+      const res = await fetch("/api/auto-sell/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        signal: controller.signal,
         body: JSON.stringify({
           mint,
-          privateKeys: keys.slice(0, 65),
-          limitWallets: 65,
-          percentage: buyPerc,
-          slippageBps,
+          privateKeys: keys,
+          config: autoSellConfig,
         }),
       })
 
-      clearTimeout(timeoutId)
-      const j = await res.json()
-      setLog(JSON.stringify(j, null, 2))
-
-      if (res.ok && j && !j.error) {
-        playBuySuccessSound()
+      const result = await res.json()
+      if (res.ok) {
+        setAutoSellStatus({ ...autoSellStatus, isRunning: true })
+        setLog(`✅ Auto-sell started for ${token.symbol || mint.slice(0, 8)}...\n${JSON.stringify(result, null, 2)}`)
+      } else {
+        setLog(`❌ Failed to start auto-sell: ${result.error}`)
       }
     } catch (e: any) {
-      if (e.name === "AbortError") {
-        setLog(`Timeout: Operation took longer than 30 seconds`)
-      } else {
-        setLog(`Error: ${e?.message || String(e)}`)
-      }
-    } finally {
-      setLoading(false)
+      setLog(`❌ Error starting auto-sell: ${e.message}`)
     }
   }
 
-  async function sell() {
-    setLoading(true)
-    setLog(`🚀 Executing ultra-fast sell with all selected wallets simultaneously...`)
-
+  async function stopAutoSell() {
     try {
-      const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 30000)
-
-      const res = await fetch("/api/sell", {
+      const res = await fetch("/api/auto-sell/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        cache: "no-store",
-        signal: controller.signal,
-        body: JSON.stringify({
-          mint,
-          privateKeys: keys.slice(0, 65),
-          limitWallets: 65,
-          percentage: sellPerc,
-          slippageBps,
-        }),
+        body: JSON.stringify({ mint }),
       })
 
-      clearTimeout(timeoutId)
-      const j = await res.json()
-      setLog(JSON.stringify(j, null, 2))
-    } catch (e: any) {
-      if (e.name === "AbortError") {
-        setLog(`Timeout: Operation took longer than 30 seconds`)
+      const result = await res.json()
+      if (res.ok) {
+        setAutoSellStatus({ ...autoSellStatus, isRunning: false })
+        setLog(`🛑 Auto-sell stopped\n${JSON.stringify(result, null, 2)}`)
       } else {
-        setLog(`Error: ${e?.message || String(e)}`)
+        setLog(`❌ Failed to stop auto-sell: ${result.error}`)
       }
-    } finally {
-      setLoading(false)
+    } catch (e: any) {
+      setLog(`❌ Error stopping auto-sell: ${e.message}`)
     }
   }
+
+  useEffect(() => {
+    if (!mint || !autoSellStatus.isRunning) return
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/auto-sell/status?mint=${mint}`)
+        if (res.ok) {
+          const status = await res.json()
+          setAutoSellStatus((prev) => ({
+            ...prev,
+            currentWindow: status.window || prev.currentWindow,
+            lastActivity: status.lastActivity || prev.lastActivity,
+            totalSells: status.totalSells || prev.totalSells,
+          }))
+        }
+      } catch (e) {
+        console.error("Failed to fetch auto-sell status:", e)
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [mint, autoSellStatus.isRunning])
 
   const selectedCount = useMemo(() => Object.values(selected).filter(Boolean).length, [selected])
   const totalSelectedSol = useMemo(
@@ -266,29 +306,41 @@ export default function Home() {
       }, 0),
     [connected, selected, balances],
   )
-  const totalVaultSol = useMemo(
-    () => connected.reduce((acc, w) => acc + (balances[w.pubkey] ?? 0), 0),
-    [connected, balances],
+  const totalSelectedTokens = useMemo(
+    () =>
+      connected.reduce((acc, w) => {
+        if (!selected[w.pubkey]) return acc
+        return acc + (tokenBalances[w.pubkey] ?? 0)
+      }, 0),
+    [connected, selected, tokenBalances],
   )
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Solana Sniper · 65 Wallets</h1>
-          <p className="text-slate-400 text-sm">Paste keys, pick mint, execute ultra-fast buy/sell.</p>
+          <h1 className="text-2xl font-semibold">Solana Auto-Sell Bot</h1>
+          <p className="text-slate-400 text-sm">Monitor trades and automatically sell when profitable.</p>
         </div>
-        <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
-          <span className="text-slate-400">RPC: </span>
-          <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-slate-400"}>
-            {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
-          </span>
+        <div className="flex gap-3">
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
+            <span className="text-slate-400">RPC: </span>
+            <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-slate-400"}>
+              {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
+            <span className="text-slate-400">Auto-Sell: </span>
+            <span className={autoSellStatus.isRunning ? "text-emerald-400" : "text-slate-400"}>
+              {autoSellStatus.isRunning ? "Running" : "Stopped"}
+            </span>
+          </div>
         </div>
       </header>
 
       <section className="grid md:grid-cols-2 gap-6">
         <div className="card space-y-3">
-          <h2 className="font-semibold">1) Connect wallets (local vault)</h2>
+          <h2 className="font-semibold">1) Connect wallets</h2>
           <textarea
             className="input min-h-[140px] font-mono"
             placeholder="One base58 or JSON secret array per line"
@@ -305,6 +357,7 @@ export default function Home() {
                 setConnected([])
                 setSelected({})
                 setBalances({})
+                setTokenBalances({})
               }}
             >
               Clear
@@ -331,7 +384,7 @@ export default function Home() {
               Selected SOL: <span className="font-mono text-white">{totalSelectedSol.toFixed(4)} SOL</span>
             </div>
             <div>
-              Total SOL: <span className="font-mono text-white">{totalVaultSol.toFixed(4)} SOL</span>
+              Selected Tokens: <span className="font-mono text-white">{totalSelectedTokens.toFixed(2)}</span>
             </div>
           </div>
 
@@ -341,7 +394,8 @@ export default function Home() {
             ) : (
               <ul className="space-y-1 text-sm">
                 {connected.map((w) => {
-                  const bal = balances[w.pubkey]
+                  const solBal = balances[w.pubkey]
+                  const tokenBal = tokenBalances[w.pubkey]
                   return (
                     <li key={w.pubkey} className="flex items-center justify-between gap-2">
                       <label className="flex items-center gap-2">
@@ -350,12 +404,21 @@ export default function Home() {
                           checked={!!selected[w.pubkey]}
                           onChange={(e) => setSelected({ ...selected, [w.pubkey]: e.target.checked })}
                         />
-                        <span className="font-mono">{w.pubkey}</span>
+                        <span className="font-mono text-xs">
+                          {w.pubkey.slice(0, 8)}...{w.pubkey.slice(-4)}
+                        </span>
                       </label>
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono tabular-nums">{bal == null ? "…" : `${bal.toFixed(4)} SOL`}</span>
+                      <div className="flex items-center gap-3 text-xs">
+                        <span className="font-mono tabular-nums">
+                          {solBal == null ? "…" : `${solBal.toFixed(3)} SOL`}
+                        </span>
+                        {mint && (
+                          <span className="font-mono tabular-nums text-orange-400">
+                            {tokenBal == null ? "…" : `${tokenBal.toFixed(2)} ${token.symbol || "TOK"}`}
+                          </span>
+                        )}
                         <span className={w.hasSecret ? "text-emerald-400" : "text-yellow-400"}>
-                          {w.hasSecret ? "secret" : "read-only"}
+                          {w.hasSecret ? "🔑" : "👁"}
                         </span>
                       </div>
                     </li>
@@ -367,7 +430,7 @@ export default function Home() {
         </div>
 
         <div className="card space-y-3">
-          <h2 className="font-semibold">2) Pick token</h2>
+          <h2 className="font-semibold">2) Configure auto-sell</h2>
           <input
             className="input"
             placeholder="Paste mint address or pump.fun URL"
@@ -389,133 +452,125 @@ export default function Home() {
             )}
           </div>
 
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => setActiveTab("buy")}
-              className={`btn flex-1 ${activeTab === "buy" ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-            >
-              🚀 BUY
-            </button>
-            <button
-              onClick={() => setActiveTab("sell")}
-              className={`btn flex-1 ${activeTab === "sell" ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-            >
-              💰 SELL
-            </button>
+          <div className="space-y-3 border-t border-slate-800 pt-3">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block text-xs text-slate-400">
+                Window (seconds):
+                <input
+                  className="input mt-1"
+                  type="number"
+                  min={30}
+                  step={30}
+                  value={autoSellConfig.windowSeconds}
+                  onChange={(e) => setAutoSellConfig({ ...autoSellConfig, windowSeconds: Number(e.target.value) })}
+                />
+              </label>
+              <label className="block text-xs text-slate-400">
+                Min trade USD:
+                <input
+                  className="input mt-1"
+                  type="number"
+                  min={0.1}
+                  step={0.1}
+                  value={autoSellConfig.minTradeUsd}
+                  onChange={(e) => setAutoSellConfig({ ...autoSellConfig, minTradeUsd: Number(e.target.value) })}
+                />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block text-xs text-slate-400">
+                Sell fraction of net:
+                <input
+                  className="input mt-1"
+                  type="number"
+                  min={0.01}
+                  max={1}
+                  step={0.01}
+                  value={autoSellConfig.sellFractionOfNet}
+                  onChange={(e) => setAutoSellConfig({ ...autoSellConfig, sellFractionOfNet: Number(e.target.value) })}
+                />
+              </label>
+              <label className="block text-xs text-slate-400">
+                Cooldown (seconds):
+                <input
+                  className="input mt-1"
+                  type="number"
+                  min={5}
+                  step={5}
+                  value={autoSellConfig.cooldownSeconds}
+                  onChange={(e) => setAutoSellConfig({ ...autoSellConfig, cooldownSeconds: Number(e.target.value) })}
+                />
+              </label>
+            </div>
+
+            <label className="block text-xs text-slate-400">
+              Slippage (bps):
+              <input
+                className="input mt-1"
+                type="number"
+                min={100}
+                step={100}
+                value={autoSellConfig.slippageBps}
+                onChange={(e) => setAutoSellConfig({ ...autoSellConfig, slippageBps: Number(e.target.value) })}
+              />
+            </label>
           </div>
 
-          <label className="block text-xs text-slate-400 mt-2">
-            Slippage (bps):
-            <input
-              className="input mt-1"
-              type="number"
-              min={100}
-              step={100}
-              value={slippageBps}
-              onChange={(e) => setSlippageBps(Math.max(100, Number(e.target.value || 0)))}
-            />
-          </label>
-          <p className="text-xs text-slate-400">2000 bps = 20%. Higher slippage = faster fills on new launches.</p>
-
-          {activeTab === "buy" ? (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <label className="block text-xs text-slate-400">Buy percentage of SOL balance:</label>
-                <div className="grid grid-cols-5 gap-2">
-                  <button
-                    onClick={() => setBuyPerc(25)}
-                    className={`btn text-xs py-2 ${buyPerc === 25 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    25%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(50)}
-                    className={`btn text-xs py-2 ${buyPerc === 50 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    50%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(75)}
-                    className={`btn text-xs py-2 ${buyPerc === 75 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    75%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(95)}
-                    className={`btn text-xs py-2 ${buyPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    95%
-                  </button>
-                  <button
-                    onClick={() => setBuyPerc(100)}
-                    className={`btn text-xs py-2 ${buyPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    100%
-                  </button>
-                </div>
-                <div className="text-xs text-slate-400">Selected: {buyPerc}% of available SOL balance</div>
-              </div>
-              <button
-                className="btn w-full bg-blue-600 hover:bg-blue-500"
-                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
-                onClick={buy}
-              >
-                {loading ? "🚀 Buying..." : "🚀 BUY"}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                <label className="block text-xs text-slate-400">Sell percentage of token balance:</label>
-                <div className="grid grid-cols-5 gap-2">
-                  <button
-                    onClick={() => setSellPerc(25)}
-                    className={`btn text-xs py-2 ${sellPerc === 25 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    25%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(50)}
-                    className={`btn text-xs py-2 ${sellPerc === 50 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    50%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(75)}
-                    className={`btn text-xs py-2 ${sellPerc === 75 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    75%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(95)}
-                    className={`btn text-xs py-2 ${sellPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    95%
-                  </button>
-                  <button
-                    onClick={() => setSellPerc(100)}
-                    className={`btn text-xs py-2 ${sellPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    100%
-                  </button>
-                </div>
-                <div className="text-xs text-slate-400">Selected: {sellPerc}% of available token balance</div>
-              </div>
-              <button
-                className="btn w-full bg-orange-600 hover:bg-orange-500"
-                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
-                onClick={sell}
-              >
-                {loading ? "💰 Selling..." : "💰 SELL"}
-              </button>
-            </div>
-          )}
+          <div className="flex gap-2 pt-3">
+            <button
+              className="btn flex-1 bg-emerald-600 hover:bg-emerald-500"
+              disabled={autoSellStatus.isRunning || !mint || Object.values(selected).every((v) => !v)}
+              onClick={startAutoSell}
+            >
+              {autoSellStatus.isRunning ? "🟢 Running" : "▶️ Start Auto-Sell"}
+            </button>
+            <button
+              className="btn flex-1 bg-red-600 hover:bg-red-500"
+              disabled={!autoSellStatus.isRunning}
+              onClick={stopAutoSell}
+            >
+              🛑 Stop
+            </button>
+          </div>
         </div>
       </section>
 
       <section className="card">
-        <h2 className="font-semibold mb-2">Run output</h2>
-        <pre className="text-xs whitespace-pre-wrap">{log}</pre>
+        <h2 className="font-semibold mb-3">Auto-Sell Status</h2>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+          <div className="text-center">
+            <div className="text-2xl font-mono text-emerald-400">${autoSellStatus.currentWindow.buys.toFixed(2)}</div>
+            <div className="text-xs text-slate-400">Buys (window)</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-mono text-red-400">${autoSellStatus.currentWindow.sells.toFixed(2)}</div>
+            <div className="text-xs text-slate-400">Sells (window)</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-mono text-blue-400">${autoSellStatus.currentWindow.net.toFixed(2)}</div>
+            <div className="text-xs text-slate-400">Net USD</div>
+          </div>
+          <div className="text-center">
+            <div className="text-2xl font-mono text-yellow-400">
+              ${autoSellStatus.currentWindow.priceUsd.toFixed(6)}
+            </div>
+            <div className="text-xs text-slate-400">Token Price</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4 text-sm text-slate-300">
+          <div>
+            Last Activity: <span className="text-white">{autoSellStatus.lastActivity}</span>
+          </div>
+          <div>
+            Total Sells: <span className="text-white">{autoSellStatus.totalSells}</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="card">
+        <h2 className="font-semibold mb-2">Activity Log</h2>
+        <pre className="text-xs whitespace-pre-wrap max-h-64 overflow-auto">{log}</pre>
       </section>
     </div>
   )
