@@ -161,101 +161,93 @@ async function analyzeTransactionVolume(
   }
 }
 
-async function monitorVolumeWithEarlyDecision(
-  connection: Connection,
-  mint: string,
-): Promise<VolumeData & { earlyDecision?: boolean }> {
-  console.log(`⚡ Starting fast volume monitoring for ${mint}`)
+async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percentage: number, slippageBps: number) {
+  const connection = new Connection(
+    process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
+    "confirmed",
+  )
 
-  const volumeData: VolumeData & { earlyDecision?: boolean } = {
+  console.log(`🎯 Starting simplified auto-sell monitoring for ${mint}`)
+  console.log(`   Wallets: ${wallets.length}`)
+  console.log(`   Sell percentage: ${percentage}%`)
+
+  try {
+    const result = await Promise.race([
+      (async () => {
+        const volumeData = await quickVolumeCheck(connection, mint)
+
+        if (volumeData.buyVolume > volumeData.sellVolume) {
+          const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
+
+          console.log(`🚀 Buy volume exceeds sell volume by ${volumeDifference.toFixed(4)} SOL`)
+
+          const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeDifference)
+          return {
+            success: true,
+            action: "sell_executed",
+            volumeData,
+            sellResult,
+            netBuyVolume: volumeDifference,
+            message: `Auto-sell executed: ${percentage}% of tokens sold`,
+          }
+        } else {
+          return {
+            success: true,
+            action: "no_sell",
+            volumeData,
+            message: `No auto-sell: insufficient buy volume`,
+          }
+        }
+      })(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Auto-sell timeout after 5 seconds")), 5000)),
+    ])
+
+    return result
+  } catch (error) {
+    console.error("❌ Auto-sell error:", error)
+    return {
+      success: false,
+      error: error.message,
+      message: "Auto-sell failed",
+    }
+  }
+}
+
+async function quickVolumeCheck(connection: Connection, mint: string): Promise<VolumeData> {
+  console.log(`⚡ Quick volume check for ${mint}`)
+
+  const volumeData: VolumeData = {
     buyVolume: 0,
     sellVolume: 0,
     transactions: [],
   }
 
-  const startTime = Date.now()
-  const maxDuration = 8000
-  let lastSignature: string | undefined
-  let consecutiveErrors = 0
-  let checkCount = 0
-
-  const absoluteTimeout = setTimeout(() => {
-    console.log(`⏰ Auto-sell monitoring timed out after ${maxDuration / 1000} seconds`)
-  }, maxDuration + 500)
-
   try {
-    while (Date.now() - startTime < maxDuration && consecutiveErrors < 2) {
-      try {
-        const signatures = (await Promise.race([
-          connection.getSignaturesForAddress(new PublicKey(mint), {
-            limit: 30,
-            before: lastSignature,
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("getSignatures timeout")), 2000)),
-        ])) as any[]
+    const signatures = (await Promise.race([
+      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 10 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 2000)),
+    ])) as any[]
 
-        consecutiveErrors = 0
-        checkCount++
+    const recentSigs = signatures.slice(0, 5)
 
-        const signaturesSlice = signatures.slice(0, 15)
+    for (const sigInfo of recentSigs) {
+      const analysis = await analyzeTransactionVolume(connection, sigInfo.signature, mint)
+      if (analysis) {
+        volumeData.transactions.push(sigInfo.signature)
 
-        for (const sigInfo of signaturesSlice) {
-          if (volumeData.transactions.includes(sigInfo.signature)) continue
-
-          const analysis = await analyzeTransactionVolume(connection, sigInfo.signature, mint)
-          if (analysis) {
-            volumeData.transactions.push(sigInfo.signature)
-
-            if (analysis.isBuy) {
-              volumeData.buyVolume += analysis.solAmount
-              console.log(
-                `🟢 Buy: ${analysis.solAmount.toFixed(4)} SOL (Total buy: ${volumeData.buyVolume.toFixed(4)} SOL)`,
-              )
-            } else {
-              volumeData.sellVolume += analysis.solAmount
-              console.log(
-                `🔴 Sell: ${analysis.solAmount.toFixed(4)} SOL (Total sell: ${volumeData.sellVolume.toFixed(4)} SOL)`,
-              )
-            }
-          }
+        if (analysis.isBuy) {
+          volumeData.buyVolume += analysis.solAmount
+        } else {
+          volumeData.sellVolume += analysis.solAmount
         }
-
-        const elapsedTime = Date.now() - startTime
-        const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
-        const totalVolume = volumeData.buyVolume + volumeData.sellVolume
-
-        if (elapsedTime >= 2000 && totalVolume >= 0.02 && volumeDifference > 0.01) {
-          console.log(`⚡ Early decision triggered after ${(elapsedTime / 1000).toFixed(1)}s`)
-          console.log(`   Buy advantage: ${volumeDifference.toFixed(4)} SOL`)
-          volumeData.earlyDecision = true
-          break
-        }
-
-        if (signatures.length > 0) {
-          lastSignature = signatures[signatures.length - 1].signature
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 300))
-      } catch (error) {
-        consecutiveErrors++
-        console.error(`Error monitoring volume (attempt ${consecutiveErrors}/2):`, error)
-        await new Promise((resolve) => setTimeout(resolve, 500))
       }
     }
-  } finally {
-    clearTimeout(absoluteTimeout)
-  }
 
-  const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
-  const monitoringTime = (Date.now() - startTime) / 1000
-
-  console.log(`📈 Volume summary for ${mint} (${monitoringTime.toFixed(1)}s monitoring):`)
-  console.log(`   🟢 Buy volume: ${volumeData.buyVolume.toFixed(4)} SOL`)
-  console.log(`   🔴 Sell volume: ${volumeData.sellVolume.toFixed(4)} SOL`)
-  console.log(`   📊 Net difference: ${volumeDifference > 0 ? "+" : ""}${volumeDifference.toFixed(4)} SOL`)
-  console.log(`   📝 Total transactions analyzed: ${volumeData.transactions.length}`)
-  if (volumeData.earlyDecision) {
-    console.log(`   ⚡ Early decision triggered`)
+    console.log(
+      `📊 Quick check: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL`,
+    )
+  } catch (error) {
+    console.error("Quick volume check error:", error)
   }
 
   return volumeData
@@ -307,73 +299,6 @@ async function executeAutoSell(
   } catch (error) {
     console.error(`❌ Auto-sell failed:`, error)
     return { error: error.message }
-  }
-}
-
-async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percentage: number, slippageBps: number) {
-  const connection = new Connection(
-    process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
-    "confirmed",
-  )
-
-  console.log(`🎯 Starting fast volume-based auto-sell monitoring for ${mint}`)
-  console.log(`   Wallets: ${wallets.length}`)
-  console.log(`   Sell percentage: ${percentage}% of detected buy volume`)
-  console.log(`   Slippage: ${slippageBps} bps`)
-
-  try {
-    const result = await Promise.race([
-      (async () => {
-        const volumeData = await monitorVolumeWithEarlyDecision(connection, mint)
-
-        if (volumeData.buyVolume > volumeData.sellVolume) {
-          const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
-          const decisionType = volumeData.earlyDecision ? "Early decision" : "Full monitoring"
-
-          console.log(
-            `🚀 ${decisionType}: Buy volume (${volumeData.buyVolume.toFixed(4)} SOL) exceeds sell volume (${volumeData.sellVolume.toFixed(4)} SOL) by ${volumeDifference.toFixed(4)} SOL`,
-          )
-          console.log(
-            `🎯 Triggering auto-sell of ${percentage}% of the net buy volume (${volumeDifference.toFixed(4)} SOL)`,
-          )
-
-          const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeDifference)
-          return {
-            success: true,
-            action: "sell_executed",
-            volumeData,
-            sellResult,
-            earlyDecision: volumeData.earlyDecision,
-            netBuyVolume: volumeDifference,
-            message: `Auto-sell executed: ${percentage}% of ${volumeDifference.toFixed(4)} SOL net buy volume = ${((volumeDifference * percentage) / 100).toFixed(4)} SOL worth of tokens sold`,
-          }
-        } else {
-          console.log(
-            `📉 Sell volume (${volumeData.sellVolume.toFixed(4)} SOL) >= buy volume (${volumeData.buyVolume.toFixed(4)} SOL)`,
-          )
-          console.log(`⏸️ No auto-sell triggered`)
-
-          return {
-            success: true,
-            action: "no_sell",
-            volumeData,
-            message: `No auto-sell: sell volume (${volumeData.sellVolume.toFixed(4)} SOL) >= buy volume (${volumeData.buyVolume.toFixed(4)} SOL)`,
-          }
-        }
-      })(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Auto-sell process timeout after 30 seconds")), 30000),
-      ),
-    ])
-
-    return result
-  } catch (error) {
-    console.error("❌ Volume-based auto-sell error:", error)
-    return {
-      success: false,
-      error: error.message,
-      message: "Failed to monitor volume or execute auto-sell",
-    }
   }
 }
 
@@ -545,13 +470,31 @@ export async function POST(request: NextRequest) {
         return Response.json({ error: "No valid wallets provided" }, { status: 400 })
       }
 
-      const result = await startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+      console.log(`🚀 Starting auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
 
-      return Response.json(result)
+      // Start the monitoring process without awaiting
+      startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+        .then((result) => {
+          console.log("Auto-sell completed:", result)
+        })
+        .catch((error) => {
+          console.error("Auto-sell failed:", error)
+        })
+
+      // Return immediate response to prevent UI hanging
+      return Response.json({
+        success: true,
+        message: `Auto-sell monitoring started for ${mint} with ${wallets.length} wallets`,
+        status: "monitoring_started",
+        mint,
+        wallets: wallets.length,
+        percentage,
+        slippageBps,
+      })
     }
 
     return Response.json(
-      { error: "Invalid request: provide trades for ingestion or mint+privateKeys for netflow mode" },
+      { error: "Invalid request: provide trades for ingestion or mint+privateKeys for monitoring" },
       { status: 400 },
     )
   } catch (error) {
