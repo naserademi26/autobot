@@ -34,11 +34,7 @@ function sanitizeMintInput(input: string): string {
   return s.replace(/[^1-9A-HJ-NP-Za-km-z]/g, "")
 }
 
-export default function Page() {
-  return <App />
-}
-
-function App() {
+export default function Home() {
   const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
 
@@ -52,14 +48,10 @@ function App() {
   const mint = useMemo(() => sanitizeMintInput(mintRaw), [mintRaw])
   const [token, setToken] = useState<TokenInfo>({})
 
-  const [activeTab, setActiveTab] = useState<"buy" | "sell" | "auto-sell">("buy")
+  const [activeTab, setActiveTab] = useState<"buy" | "sell">("buy")
   const [buyPerc, setBuyPerc] = useState<number>(50)
   const [sellPerc, setSellPerc] = useState<number>(100)
   const [slippageBps, setSlippageBps] = useState<number>(2000)
-
-  const [autoSellActive, setAutoSellActive] = useState(false)
-  const [autoSellPerc, setAutoSellPerc] = useState<number>(100)
-  const [monitoredMints, setMonitoredMints] = useState<string[]>([])
 
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string>("")
@@ -177,19 +169,16 @@ function App() {
     setSelected(s)
   }
 
-  async function execute() {
+  async function buy() {
     setLoading(true)
-    const action = activeTab === "buy" ? "buy" : "sell"
-    const percentage = activeTab === "buy" ? buyPerc : sellPerc
-    setLog(`🚀 Executing ultra-fast ${action} with all selected wallets simultaneously...`)
+    setLog(`🚀 Executing ultra-fast buy with all selected wallets simultaneously...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 30000)
 
-      const endpoint = activeTab === "buy" ? "/api/snipe" : "/api/sell"
-      const res = await fetch(endpoint, {
+      const res = await fetch("/api/snipe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
@@ -198,7 +187,7 @@ function App() {
           mint,
           privateKeys: keys.slice(0, 65),
           limitWallets: 65,
-          percentage,
+          percentage: buyPerc,
           slippageBps,
         }),
       })
@@ -217,60 +206,38 @@ function App() {
     }
   }
 
-  async function startAutoSell() {
-    if (!mint) return
+  async function sell() {
     setLoading(true)
-    setLog(`🤖 Starting auto-sell monitoring for ${mint}...`)
+    setLog(`🚀 Executing ultra-fast sell with all selected wallets simultaneously...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
-      const res = await fetch("/api/auto-sell", {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000)
+
+      const res = await fetch("/api/sell", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        signal: controller.signal,
         body: JSON.stringify({
-          action: "start",
           mint,
           privateKeys: keys.slice(0, 65),
-          percentage: autoSellPerc,
+          limitWallets: 65,
+          percentage: sellPerc,
           slippageBps,
         }),
       })
 
+      clearTimeout(timeoutId)
       const j = await res.json()
-      if (j.success) {
-        setAutoSellActive(true)
-        setMonitoredMints([...monitoredMints, mint])
-        setLog(`✅ Auto-sell monitoring started for ${mint}\nWatching for new buys to trigger sells...`)
+      setLog(JSON.stringify(j, null, 2))
+    } catch (e: any) {
+      if (e.name === "AbortError") {
+        setLog(`Timeout: Operation took longer than 30 seconds`)
       } else {
-        setLog(`❌ Failed to start auto-sell: ${j.error}`)
+        setLog(`Error: ${e?.message || String(e)}`)
       }
-    } catch (e: any) {
-      setLog(`Error: ${e?.message || String(e)}`)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function stopAutoSell() {
-    setLoading(true)
-    setLog(`🛑 Stopping auto-sell monitoring...`)
-
-    try {
-      const res = await fetch("/api/auto-sell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "stop",
-          mint,
-        }),
-      })
-
-      const j = await res.json()
-      setAutoSellActive(false)
-      setMonitoredMints(monitoredMints.filter((m) => m !== mint))
-      setLog(`✅ Auto-sell monitoring stopped`)
-    } catch (e: any) {
-      setLog(`Error: ${e?.message || String(e)}`)
     } finally {
       setLoading(false)
     }
@@ -295,7 +262,7 @@ function App() {
       <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Solana Sniper · 65 Wallets</h1>
-          <p className="text-slate-400 text-sm">Paste keys, pick mint, execute ultra-fast buy/sell or auto-sell.</p>
+          <p className="text-slate-400 text-sm">Paste keys, pick mint, execute ultra-fast buy/sell.</p>
         </div>
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
           <span className="text-slate-400">RPC: </span>
@@ -408,97 +375,20 @@ function App() {
             )}
           </div>
 
-          <div className="flex gap-2 mt-4">
+          <div className="flex gap-2 mb-4">
             <button
               onClick={() => setActiveTab("buy")}
-              className={`btn flex-1 ${activeTab === "buy" ? "bg-emerald-600 hover:bg-emerald-500" : "bg-slate-700 hover:bg-slate-600"}`}
+              className={`btn flex-1 ${activeTab === "buy" ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
             >
               🚀 BUY
             </button>
             <button
               onClick={() => setActiveTab("sell")}
-              className={`btn flex-1 ${activeTab === "sell" ? "bg-rose-600 hover:bg-rose-500" : "bg-slate-700 hover:bg-slate-600"}`}
+              className={`btn flex-1 ${activeTab === "sell" ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
             >
               💰 SELL
             </button>
-            <button
-              onClick={() => setActiveTab("auto-sell")}
-              className={`btn flex-1 ${activeTab === "auto-sell" ? "bg-purple-600 hover:bg-purple-500" : "bg-slate-700 hover:bg-slate-600"}`}
-            >
-              🤖 AUTO SELL
-            </button>
           </div>
-
-          {activeTab === "buy" ? (
-            <div className="space-y-3">
-              <h3 className="font-semibold">3) Buy percentage & slippage</h3>
-              <div className="flex flex-wrap gap-2">
-                {[25, 50, 75, 95, 100].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setBuyPerc(p)}
-                    className={`btn ${buyPerc === p ? "bg-emerald-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    {p}%
-                  </button>
-                ))}
-              </div>
-              <p className="text-xs text-slate-400">Percentage of SOL balance to spend on buying tokens.</p>
-            </div>
-          ) : activeTab === "sell" ? (
-            <div className="space-y-3">
-              <h3 className="font-semibold">3) Sell percentage</h3>
-              <div className="flex flex-wrap gap-2">
-                {[25, 50, 75, 100].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => setSellPerc(p)}
-                    className={`btn ${sellPerc === p ? "bg-rose-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                  >
-                    {p}%
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setSellPerc(100)}
-                className={`btn w-full ${sellPerc === 100 ? "bg-rose-500" : "bg-slate-700 hover:bg-slate-600"}`}
-              >
-                SELL ALL (100%)
-              </button>
-              <p className="text-xs text-slate-400">Percentage of token balance to sell.</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <h3 className="font-semibold">3) Auto-sell settings</h3>
-              <div className="space-y-2">
-                <label className="block text-xs text-slate-400">Sell percentage when triggered:</label>
-                <div className="flex flex-wrap gap-2">
-                  {[25, 50, 75, 100].map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => setAutoSellPerc(p)}
-                      className={`btn ${autoSellPerc === p ? "bg-purple-500" : "bg-slate-700 hover:bg-slate-600"}`}
-                    >
-                      {p}%
-                    </button>
-                  ))}
-                </div>
-
-                {monitoredMints.length > 0 && (
-                  <div className="text-xs text-slate-300">
-                    <p className="font-semibold">Currently monitoring:</p>
-                    <ul className="list-disc list-inside">
-                      {monitoredMints.map((m) => (
-                        <li key={m} className="font-mono">
-                          {m}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           <label className="block text-xs text-slate-400 mt-2">
             Slippage (bps):
@@ -513,31 +403,26 @@ function App() {
           </label>
           <p className="text-xs text-slate-400">2000 bps = 20%. Higher slippage = faster fills on new launches.</p>
 
-          {activeTab === "auto-sell" ? (
+          {activeTab === "buy" ? (
             <div className="space-y-2">
               <button
-                className="btn w-full bg-purple-600 hover:bg-purple-500"
-                disabled={loading || !mint || Object.values(selected).every((v) => !v) || autoSellActive}
-                onClick={startAutoSell}
+                className="btn w-full bg-blue-600 hover:bg-blue-500"
+                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
+                onClick={buy}
               >
-                {loading ? "🤖 Starting auto-sell..." : autoSellActive ? "🤖 AUTO-SELL ACTIVE" : "🤖 START AUTO-SELL"}
+                {loading ? "🚀 Buying..." : "🚀 BUY"}
               </button>
-              {autoSellActive && (
-                <button className="btn w-full bg-red-600 hover:bg-red-500" disabled={loading} onClick={stopAutoSell}>
-                  🛑 STOP AUTO-SELL
-                </button>
-              )}
             </div>
           ) : (
-            <button
-              className="btn w-full mt-2"
-              disabled={loading || !mint || Object.values(selected).every((v) => !v)}
-              onClick={execute}
-            >
-              {loading
-                ? `🚀 ${activeTab === "buy" ? "Buying" : "Selling"} with all wallets...`
-                : `🚀 ULTRA-FAST ${activeTab.toUpperCase()} (All Wallets)`}
-            </button>
+            <div className="space-y-2">
+              <button
+                className="btn w-full bg-orange-600 hover:bg-orange-500"
+                disabled={loading || !mint || Object.values(selected).every((v) => !v)}
+                onClick={sell}
+              >
+                {loading ? "💰 Selling..." : "💰 SELL"}
+              </button>
+            </div>
           )}
         </div>
       </section>
