@@ -16,8 +16,7 @@ const BodySchema = z.object({
   privateKeys: z.array(z.string()).optional(),
   percentage: z.number().optional(),
   slippageBps: z.number().optional(),
-  mode: z.enum(["netflow", "perbuy", "volume"]).optional(),
-  delayMinutes: z.number().optional(), // Added delayMinutes parameter
+  mode: z.enum(["netflow", "perbuy"]).optional(),
 })
 
 // In-memory state for volume tracking
@@ -27,8 +26,6 @@ let lastSellAt = 0
 const NET_FRACTION = 0.25 // 25% of net volume
 const WINDOW_SECONDS = 120 // 2 minutes
 const COOLDOWN_MS = 0 // No cooldown by default
-
-const delayedAutoSellTasks = new Map<string, NodeJS.Timeout>()
 
 async function getUsdPerBaseUnit(mint: string): Promise<number> {
   const QUOTE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
@@ -164,94 +161,51 @@ async function analyzeTransactionVolume(
   }
 }
 
-interface AutoSellConfig {
-  mint: string
-  wallets: Keypair[]
-  percentage: number
-  slippageBps: number
-  delayMinutes?: number
-}
-
-async function startVolumeBasedAutoSell(
-  mint: string,
-  wallets: Keypair[],
-  percentage: number,
-  slippageBps: number,
-  delayMinutes?: number,
-) {
+async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percentage: number, slippageBps: number) {
   const connection = new Connection(
     process.env.NEXT_PUBLIC_RPC_URL || "https://api.mainnet-beta.solana.com",
     "confirmed",
   )
 
-  console.log(`🎯 Starting auto-sell monitoring for ${mint}`)
+  console.log(`🎯 Starting simplified auto-sell monitoring for ${mint}`)
   console.log(`   Wallets: ${wallets.length}`)
   console.log(`   Sell percentage: ${percentage}%`)
-  if (delayMinutes) {
-    console.log(`   Delay after buy detection: ${delayMinutes} minutes`)
-  }
 
   try {
     const result = await Promise.race([
       (async () => {
         const volumeData = await quickVolumeCheck(connection, mint)
 
-        if (volumeData.buyVolume > volumeData.sellVolume) {
-          const volumeDifference = volumeData.buyVolume - volumeData.sellVolume
+        const totalVolume = volumeData.buyVolume + volumeData.sellVolume
+        const hasSignificantActivity = totalVolume > 0.01 // At least 0.01 SOL total volume
+        const hasBuyActivity = volumeData.buyVolume > 0.005 // At least 0.005 SOL buy volume
 
-          console.log(`🚀 Buy volume exceeds sell volume by ${volumeDifference.toFixed(4)} SOL`)
+        console.log(
+          `📈 Volume analysis: Total: ${totalVolume.toFixed(4)} SOL, Buy: ${volumeData.buyVolume.toFixed(4)} SOL`,
+        )
+        console.log(`🎯 Triggers: Significant activity: ${hasSignificantActivity}, Buy activity: ${hasBuyActivity}`)
 
-          if (delayMinutes && delayMinutes > 0) {
-            const delayMs = delayMinutes * 60 * 1000
-            const taskKey = `${mint}-${Date.now()}`
+        if (hasSignificantActivity && hasBuyActivity) {
+          console.log(`🚀 Auto-sell triggered! Buy volume: ${volumeData.buyVolume.toFixed(4)} SOL detected`)
 
-            console.log(`⏰ Scheduling auto-sell in ${delayMinutes} minutes...`)
-
-            // Clear any existing delayed task for this mint
-            const existingTaskKey = Array.from(delayedAutoSellTasks.keys()).find((key) => key.startsWith(mint))
-            if (existingTaskKey) {
-              clearTimeout(delayedAutoSellTasks.get(existingTaskKey)!)
-              delayedAutoSellTasks.delete(existingTaskKey)
-              console.log(`🔄 Replaced existing delayed auto-sell for ${mint}`)
-            }
-
-            const timeoutId = setTimeout(async () => {
-              console.log(`⏰ Executing delayed auto-sell for ${mint} after ${delayMinutes} minutes`)
-              const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeDifference)
-              delayedAutoSellTasks.delete(taskKey)
-              console.log(`✅ Delayed auto-sell completed for ${mint}:`, sellResult)
-            }, delayMs)
-
-            delayedAutoSellTasks.set(taskKey, timeoutId)
-
-            return {
-              success: true,
-              action: "sell_scheduled",
-              volumeData,
-              netBuyVolume: volumeDifference,
-              delayMinutes,
-              scheduledAt: new Date().toISOString(),
-              executeAt: new Date(Date.now() + delayMs).toISOString(),
-              message: `Auto-sell scheduled: ${percentage}% of tokens will be sold in ${delayMinutes} minutes`,
-            }
-          } else {
-            // Immediate execution (existing behavior)
-            const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeDifference)
-            return {
-              success: true,
-              action: "sell_executed",
-              volumeData,
-              sellResult,
-              netBuyVolume: volumeDifference,
-              message: `Auto-sell executed: ${percentage}% of tokens sold`,
-            }
+          const sellResult = await executeAutoSell(mint, wallets, percentage, slippageBps, volumeData.buyVolume)
+          return {
+            success: true,
+            action: "sell_executed",
+            volumeData,
+            sellResult,
+            buyVolume: volumeData.buyVolume,
+            totalVolume,
+            message: `Auto-sell executed: ${percentage}% of tokens sold due to ${volumeData.buyVolume.toFixed(4)} SOL buy volume`,
           }
         } else {
           return {
             success: true,
             action: "no_sell",
             volumeData,
-            message: `No auto-sell: insufficient buy volume`,
+            totalVolume,
+            reason: hasSignificantActivity ? "insufficient_buy_volume" : "no_significant_activity",
+            message: `No auto-sell: ${!hasSignificantActivity ? "insufficient total volume" : "insufficient buy volume"}`,
           }
         }
       })(),
@@ -280,11 +234,12 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
 
   try {
     const signatures = (await Promise.race([
-      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 10 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 2000)),
+      connection.getSignaturesForAddress(new PublicKey(mint), { limit: 20 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Quick check timeout")), 5000)),
     ])) as any[]
 
-    const recentSigs = signatures.slice(0, 5)
+    const recentSigs = signatures.slice(0, 10)
+    console.log(`🔍 Analyzing ${recentSigs.length} recent transactions`)
 
     for (const sigInfo of recentSigs) {
       const analysis = await analyzeTransactionVolume(connection, sigInfo.signature, mint)
@@ -300,7 +255,7 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
     }
 
     console.log(
-      `📊 Quick check: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL`,
+      `📊 Volume analysis: Buy ${volumeData.buyVolume.toFixed(4)} SOL, Sell ${volumeData.sellVolume.toFixed(4)} SOL, Total transactions: ${volumeData.transactions.length}`,
     )
   } catch (error) {
     console.error("Quick volume check error:", error)
@@ -366,6 +321,46 @@ async function executeAutoSell(
   }
 }
 
+async function handleNetflowMode(mint: string, privateKeys: string[], percentage: number, slippageBps: number) {
+  const wallets: Keypair[] = []
+  for (const pk of privateKeys) {
+    try {
+      const secretKey = bs58.decode(pk)
+      const keypair = Keypair.fromSecretKey(secretKey)
+      wallets.push(keypair)
+    } catch (error) {
+      console.error(`Invalid private key: ${pk}`)
+      continue
+    }
+  }
+
+  if (wallets.length === 0) {
+    return Response.json({ error: "No valid wallets provided" }, { status: 400 })
+  }
+
+  console.log(`🚀 Starting auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
+
+  // Start the monitoring process without awaiting
+  startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+    .then((result) => {
+      console.log("Auto-sell completed:", result)
+    })
+    .catch((error) => {
+      console.error("Auto-sell failed:", error)
+    })
+
+  // Return immediate response to prevent UI hanging
+  return Response.json({
+    success: true,
+    message: `Auto-sell monitoring started for ${mint} with ${wallets.length} wallets`,
+    status: "monitoring_started",
+    mint,
+    wallets: wallets.length,
+    percentage,
+    slippageBps,
+  })
+}
+
 interface VolumeData {
   buyVolume: number
   sellVolume: number
@@ -375,48 +370,13 @@ interface VolumeData {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const {
-      mint,
-      privateKeys,
-      percentage = 25,
-      slippageBps = 2000,
-      mode = "volume",
-      trades,
-      delayMinutes, // Added delayMinutes parameter
-    } = body
+    const parsed = BodySchema.safeParse(body)
 
-    console.log(`🤖 Auto-sell request: ${mode} mode for ${mint}`)
-    if (delayMinutes) {
-      console.log(`   Delay setting: ${delayMinutes} minutes`)
+    if (!parsed.success) {
+      return Response.json({ error: "Invalid request body", details: parsed.error }, { status: 400 })
     }
 
-    // Handle volume-based auto-sell with delay support
-    if (mode === "volume" && mint && privateKeys) {
-      const wallets: Keypair[] = []
-      for (const pk of privateKeys) {
-        try {
-          const secretKey = bs58.decode(pk)
-          const keypair = Keypair.fromSecretKey(secretKey)
-          wallets.push(keypair)
-        } catch (error) {
-          console.error("Invalid private key:", error)
-          continue
-        }
-      }
-
-      if (wallets.length === 0) {
-        return Response.json({ error: "No valid wallets provided" }, { status: 400 })
-      }
-
-      const result = await startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps, delayMinutes)
-
-      return Response.json({
-        success: true,
-        monitoring_started: true,
-        result,
-        message: result.message,
-      })
-    }
+    const { trades, mint, privateKeys, percentage = 25, slippageBps = 2000, mode = "netflow" } = parsed.data
 
     // Handle trade ingestion for volume tracking
     if (trades && trades.length > 0) {
@@ -553,23 +513,7 @@ export async function POST(request: NextRequest) {
 
     // Fallback to original volume monitoring if no trades provided
     if (!trades && mint && privateKeys) {
-      const wallets: Keypair[] = []
-      for (const pk of privateKeys) {
-        try {
-          const secretKey = bs58.decode(pk)
-          const keypair = Keypair.fromSecretKey(secretKey)
-          wallets.push(keypair)
-        } catch (error) {
-          console.error("Invalid private key:", error)
-          continue
-        }
-      }
-
-      if (wallets.length === 0) {
-        return Response.json({ error: "No valid wallets provided" }, { status: 400 })
-      }
-
-      return await startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+      return await handleNetflowMode(mint, privateKeys, percentage, slippageBps)
     }
 
     return Response.json(

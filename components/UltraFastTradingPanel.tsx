@@ -9,8 +9,8 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { useUltraFastTrading } from "@/hooks/useUltraFastTrading"
 import { useRealTokenPrice } from "@/hooks/useRealTokenPrice"
-import { toast } from "react-toastify"
 import {
   TrendingUp,
   TrendingDown,
@@ -26,99 +26,76 @@ import {
   Trash2,
   Settings,
 } from "lucide-react"
+import type { WalletData } from "@/hooks/useWalletManager"
 
-interface TradeResult {
-  id: string
-  type: "buy" | "sell"
-  status: "pending" | "success" | "error"
-  walletAddress: string
-  amount: string
-  tokenAmount?: number
-  executionTime?: number
-  error?: string
-  signature?: string
+interface UltraFastTradingPanelProps {
+  wallets: WalletData[]
+  selectedWallets: string[]
 }
 
-export default function UltraFastTradingPanel() {
+export function UltraFastTradingPanel({ wallets, selectedWallets }: UltraFastTradingPanelProps) {
   const [tokenMint, setTokenMint] = useState("")
   const [buyAmount, setBuyAmount] = useState("0.01")
   const [slippage, setSlippage] = useState("50")
   const [randomMode, setRandomMode] = useState<"preset" | "custom">("preset")
-  const [minPercentage, setMinPercentage] = useState("10")
-  const [maxPercentage, setMaxPercentage] = useState("90")
-  const [selectedPercentages, setSelectedPercentages] = useState<number[]>([25, 50, 75, 100])
-  const [isTrading, setIsTrading] = useState(false)
-  const [results, setResults] = useState<TradeResult[]>([])
-  const [tradingProgress, setTradingProgress] = useState({ current: 0, total: 0 })
-  const [autoSellActive, setAutoSellActive] = useState(false)
-  const [autoSellDelay, setAutoSellDelay] = useState("0")
-  const { tokenPrice } = useRealTokenPrice(tokenMint)
+  const [minPercent, setMinPercent] = useState("25")
+  const [maxPercent, setMaxPercent] = useState("100")
+  const [presetRange, setPresetRange] = useState("25")
 
-  const selectedConnectedWallets = [] // Placeholder for selected wallets
-  const totalSelectedBalance = 0 // Placeholder for total balance
+  const { results, isTrading, tradingProgress, executeBuy, executeRandomPercentageBuy, executeSell, clearResults } =
+    useUltraFastTrading()
+  const { tokenPrice, isLoading: isPriceLoading, fetchPrice } = useRealTokenPrice()
+
+  const selectedConnectedWallets = wallets.filter((w) => selectedWallets.includes(w.id) && w.connected)
+  const totalSelectedBalance = selectedConnectedWallets.reduce((sum, wallet) => sum + wallet.balance, 0)
 
   const handleGetPrice = async () => {
     if (!tokenMint.trim()) return
-    // Placeholder for fetching price
+    await fetchPrice(tokenMint.trim())
   }
 
   const handleBuy = async () => {
     if (!tokenMint.trim() || !buyAmount || selectedConnectedWallets.length === 0) return
-    // Placeholder for executing buy
+    await executeBuy(
+      selectedConnectedWallets,
+      tokenMint.trim(),
+      Number.parseFloat(buyAmount),
+      Number.parseInt(slippage),
+    )
   }
 
   const handleRandomPercentageBuy = async () => {
     if (!tokenMint.trim() || selectedConnectedWallets.length === 0) return
-    // Placeholder for executing random percentage buy
+
+    let min: number, max: number
+
+    if (randomMode === "preset") {
+      // Use exact percentage for preset mode
+      const exactPercent = Number.parseInt(presetRange)
+      min = exactPercent
+      max = exactPercent
+    } else {
+      min = Number.parseInt(minPercent)
+      max = Number.parseInt(maxPercent)
+    }
+
+    if (randomMode === "custom" && min >= max) {
+      console.error("❌ Min percentage must be less than max percentage")
+      return
+    }
+
+    await executeRandomPercentageBuy(selectedConnectedWallets, tokenMint.trim(), Number.parseInt(slippage), min, max)
   }
 
   const handleSell = async (percentage: number) => {
     if (!tokenMint.trim() || selectedConnectedWallets.length === 0) return
-    // Placeholder for executing sell
+    await executeSell(selectedConnectedWallets, tokenMint.trim(), percentage, Number.parseInt(slippage))
   }
 
   const successfulTrades = results.filter((r) => r.status === "success").length
   const failedTrades = results.filter((r) => r.status === "error").length
   const pendingTrades = results.filter((r) => r.status === "pending").length
   const progressPercentage = tradingProgress.total > 0 ? (tradingProgress.current / tradingProgress.total) * 100 : 0
-
-  const handleAutoSell = async () => {
-    if (!tokenMint.trim() || selectedConnectedWallets.length === 0) return
-
-    setAutoSellActive(true)
-    try {
-      const privateKeys = selectedConnectedWallets.map((w) => w.privateKey)
-
-      const response = await fetch("/api/auto-sell", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mint: tokenMint.trim(),
-          privateKeys,
-          percentage: 100,
-          slippageBps: Number.parseInt(slippage) * 100,
-          mode: "volume",
-          delayMinutes: Number.parseInt(autoSellDelay) || 0,
-        }),
-      })
-
-      const result = await response.json()
-      console.log("Auto-sell result:", result)
-
-      if (result.success) {
-        const delayText =
-          Number.parseInt(autoSellDelay) > 0 ? ` (scheduled in ${autoSellDelay} minutes)` : " (immediate)"
-        toast.success(`Auto-sell monitoring started${delayText}`)
-      } else {
-        toast.error(`Auto-sell failed: ${result.error}`)
-      }
-    } catch (error) {
-      console.error("Auto-sell error:", error)
-      toast.error("Auto-sell request failed")
-    } finally {
-      setAutoSellActive(false)
-    }
-  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -171,11 +148,11 @@ export default function UltraFastTradingPanel() {
               />
               <Button
                 onClick={handleGetPrice}
-                disabled={false || !tokenMint.trim()}
+                disabled={isPriceLoading || !tokenMint.trim()}
                 size="sm"
                 className="bg-purple-600 hover:bg-purple-700"
               >
-                {false ? <RefreshCw className="h-4 w-4 animate-spin" /> : <DollarSign className="h-4 w-4" />}
+                {isPriceLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <DollarSign className="h-4 w-4" />}
               </Button>
             </div>
           </div>
@@ -184,7 +161,7 @@ export default function UltraFastTradingPanel() {
           {tokenPrice && (
             <div className="bg-green-900/20 border border-green-600/50 rounded-lg p-3">
               <div className="text-center">
-                <div className="text-2xl font-bold text-green-400">${tokenPrice.toFixed(8)}</div>
+                <div className="text-2xl font-bold text-green-400">${tokenPrice.price.toFixed(8)}</div>
                 <div className="text-sm text-green-300">Current Token Price</div>
               </div>
             </div>
@@ -249,10 +226,7 @@ export default function UltraFastTradingPanel() {
             {randomMode === "preset" && (
               <div className="space-y-2">
                 <Label className="text-slate-300 text-sm">Exact Percentage</Label>
-                <Select
-                  value={selectedPercentages[0]}
-                  onValueChange={(value) => setSelectedPercentages([Number(value)])}
-                >
+                <Select value={presetRange} onValueChange={setPresetRange}>
                   <SelectTrigger className="bg-slate-800 border-slate-600 text-white">
                     <SelectValue />
                   </SelectTrigger>
@@ -292,9 +266,9 @@ export default function UltraFastTradingPanel() {
                 <div className="space-y-2">
                   <Label className="text-slate-300 text-sm">Min %</Label>
                   <Input
-                    value={minPercentage}
-                    onChange={(e) => setMinPercentage(e.target.value)}
-                    placeholder="10"
+                    value={minPercent}
+                    onChange={(e) => setMinPercent(e.target.value)}
+                    placeholder="25"
                     type="number"
                     min="1"
                     max="99"
@@ -304,9 +278,9 @@ export default function UltraFastTradingPanel() {
                 <div className="space-y-2">
                   <Label className="text-slate-300 text-sm">Max %</Label>
                   <Input
-                    value={maxPercentage}
-                    onChange={(e) => setMaxPercentage(e.target.value)}
-                    placeholder="90"
+                    value={maxPercent}
+                    onChange={(e) => setMaxPercent(e.target.value)}
+                    placeholder="100"
                     type="number"
                     min="2"
                     max="100"
@@ -369,8 +343,8 @@ export default function UltraFastTradingPanel() {
                 ) : (
                   <div className="flex items-center gap-2">
                     <Zap className="w-5 h-5" />🔥 LIGHTNING % BUY (
-                    {randomMode === "preset" ? `${selectedPercentages[0]}%` : `${minPercentage}%-${maxPercentage}%`}) -
-                    ALL {selectedConnectedWallets.length} WALLETS
+                    {randomMode === "preset" ? `${presetRange}%` : `${minPercent}%-${maxPercent}%`}) - ALL{" "}
+                    {selectedConnectedWallets.length} WALLETS
                   </div>
                 )}
               </Button>
@@ -381,80 +355,39 @@ export default function UltraFastTradingPanel() {
           <div className="space-y-3">
             <h3 className="text-sm font-medium text-slate-300">🔥 Lightning Speed Sell Controls</h3>
             <div className="grid grid-cols-2 gap-2">
-              {selectedPercentages.map((pct) => (
-                <Button
-                  key={pct}
-                  onClick={() => handleSell(pct)}
-                  disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
-                  variant="outline"
-                  className="border-red-600 text-red-400 hover:bg-red-900/20"
-                >
-                  <TrendingDown className="h-4 w-4 mr-1" />🔥 {pct}%
-                </Button>
-              ))}
+              <Button
+                onClick={() => handleSell(25)}
+                disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
+                variant="outline"
+                className="border-red-600 text-red-400 hover:bg-red-900/20"
+              >
+                <TrendingDown className="h-4 w-4 mr-1" />🔥 25%
+              </Button>
+              <Button
+                onClick={() => handleSell(50)}
+                disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
+                variant="outline"
+                className="border-red-600 text-red-400 hover:bg-red-900/20"
+              >
+                <TrendingDown className="h-4 w-4 mr-1" />🔥 50%
+              </Button>
+              <Button
+                onClick={() => handleSell(75)}
+                disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
+                variant="outline"
+                className="border-red-600 text-red-400 hover:bg-red-900/20"
+              >
+                <TrendingDown className="h-4 w-4 mr-1" />🔥 75%
+              </Button>
+              <Button
+                onClick={() => handleSell(100)}
+                disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
+                variant="outline"
+                className="border-red-600 text-red-400 hover:bg-red-900/20"
+              >
+                <TrendingDown className="h-4 w-4 mr-1" />🔥 100%
+              </Button>
             </div>
-          </div>
-
-          {/* Auto-sell Settings */}
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-purple-400" />
-              <Label className="text-slate-300">3) Auto-sell settings</Label>
-            </div>
-            <div className="text-xs text-slate-400">Sell percentage when triggered:</div>
-            <div className="flex gap-2">
-              {[25, 50, 75, 100].map((pct) => (
-                <Button
-                  key={pct}
-                  variant="outline"
-                  size="sm"
-                  className="border-purple-600 text-purple-400 hover:bg-purple-900/20 bg-transparent"
-                >
-                  {pct}%
-                </Button>
-              ))}
-            </div>
-
-            <div className="space-y-2">
-              <Label className="text-slate-300 text-sm">Delay after buy detection (minutes)</Label>
-              <Input
-                value={autoSellDelay}
-                onChange={(e) => setAutoSellDelay(e.target.value)}
-                placeholder="0"
-                type="number"
-                min="0"
-                max="60"
-                className="bg-slate-800 border-slate-600 text-white"
-              />
-              <div className="text-xs text-slate-400">
-                0 = immediate sell, 1-60 = wait X minutes after detecting buy activity
-              </div>
-            </div>
-
-            <div className="text-xs text-slate-400">
-              {Number.parseInt(autoSellDelay) > 0
-                ? `2000 bps = 20%. Higher slippage = faster buys/sells.`
-                : "2000 bps = 20%. Higher slippage = faster buys/sells."}
-            </div>
-            <Button
-              onClick={handleAutoSell}
-              disabled={autoSellActive || !tokenMint.trim() || selectedConnectedWallets.length === 0}
-              className="w-full bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700"
-            >
-              {autoSellActive ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  {Number.parseInt(autoSellDelay) > 0
-                    ? `Scheduling auto-sell (${autoSellDelay}min delay)...`
-                    : "Starting auto-sell..."}
-                </>
-              ) : (
-                <>
-                  <Zap className="h-4 w-4 mr-2" />
-                  AUTO SELL
-                </>
-              )}
-            </Button>
           </div>
         </CardContent>
       </Card>
@@ -467,7 +400,7 @@ export default function UltraFastTradingPanel() {
               <TrendingUp className="w-5 h-5" />🔥 Lightning Speed Results ({results.length})
             </div>
             <Button
-              onClick={() => setResults([])}
+              onClick={clearResults}
               disabled={results.length === 0}
               size="sm"
               variant="ghost"
