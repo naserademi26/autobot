@@ -3,6 +3,7 @@ import { Keypair } from "@solana/web3.js"
 import { Connection, PublicKey } from "@solana/web3.js"
 import bs58 from "bs58"
 import { z } from "zod"
+import WebSocket from "ws"
 
 const TradeSchema = z.object({
   ts: z.number(),
@@ -19,13 +20,26 @@ const BodySchema = z.object({
   mode: z.enum(["netflow", "perbuy"]).optional(),
 })
 
-// In-memory state for volume tracking
 let lastPush: { buyers_usd: number; sellers_usd: number; at: number; window_seconds: number } | null = null
 let lastSellAt = 0
 
 const NET_FRACTION = 0.25 // 25% of net volume
 const WINDOW_SECONDS = 120 // 2 minutes
 const COOLDOWN_MS = 0 // No cooldown by default
+
+const BLOXROUTE_WS_URL = "wss://api.blxrbdn.com/ws"
+const BLOXROUTE_API_KEY = process.env.BLOXROUTE_API_KEY || process.env.NEXT_PUBLIC_BLOXROUTE_API_KEY
+
+const activeMonitoringSessions = new Map<
+  string,
+  {
+    ws: WebSocket | null
+    wallets: Keypair[]
+    percentage: number
+    slippageBps: number
+    startTime: number
+  }
+>()
 
 async function getUsdPerBaseUnit(mint: string): Promise<number> {
   const QUOTE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
@@ -60,8 +74,6 @@ async function tokensFromUsd(usd: number, mint: string): Promise<bigint> {
 }
 
 async function sendToExecutor(payload: any) {
-  // For now, use the existing sell handler as executor
-  // In production, this would call an external service
   const { POST: sellHandler } = await import("../sell/route")
 
   const mockRequest = {
@@ -112,7 +124,6 @@ async function analyzeTransactionVolume(
     let tokenAmountChange = 0
     let solAmountChange = 0
 
-    // Check if this is a Jupiter swap - improved detection
     if (tx.transaction?.message?.accountKeys) {
       for (const account of tx.transaction.message.accountKeys) {
         const accountStr = typeof account === "string" ? account : account.toString()
@@ -151,7 +162,6 @@ async function analyzeTransactionVolume(
         }
       }
 
-      // Check for new token accounts (buys) - more aggressive detection
       for (const postToken of tx.meta.postTokenBalances) {
         if (postToken.mint === normalizedMint || postToken.mint === mint) {
           const hasPreBalance = tx.meta.preTokenBalances.some((pre) => pre.accountIndex === postToken.accountIndex)
@@ -168,12 +178,10 @@ async function analyzeTransactionVolume(
     for (let i = 0; i < Math.min(preBalances.length, postBalances.length); i++) {
       const solChange = (postBalances[i] - preBalances[i]) / 1e9
       if (Math.abs(solChange) > 0.0005) {
-        // Lower threshold
         solAmountChange += Math.abs(solChange)
       }
     }
 
-    // Determine if this is a buy or sell
     const isBuy = tokenAmountChange > 0
     const isSell = tokenAmountChange < 0
 
@@ -181,7 +189,7 @@ async function analyzeTransactionVolume(
       return null
     }
 
-    const minSolAmount = 0.0001 // Much lower threshold
+    const minSolAmount = 0.0001
     if (solAmountChange < minSolAmount && Math.abs(tokenAmountChange) < 0.001) {
       return null
     }
@@ -191,7 +199,7 @@ async function analyzeTransactionVolume(
     )
 
     return {
-      isBuy: isBuy || solAmountChange > 0.0005, // More aggressive buy detection
+      isBuy: isBuy || solAmountChange > 0.0005,
       solAmount: solAmountChange,
     }
   } catch (error) {
@@ -216,8 +224,8 @@ async function startVolumeBasedAutoSell(mint: string, wallets: Keypair[], percen
         const volumeData = await quickVolumeCheck(connection, mint)
 
         const totalVolume = volumeData.buyVolume + volumeData.sellVolume
-        const hasSignificantActivity = totalVolume > 0.001 // Lowered from 0.01 to 0.001 SOL
-        const hasBuyActivity = volumeData.buyVolume > 0.0005 // Lowered from 0.005 to 0.0005 SOL
+        const hasSignificantActivity = totalVolume > 0.001
+        const hasBuyActivity = volumeData.buyVolume > 0.0005
 
         console.log(
           `📈 Volume analysis: Total: ${totalVolume.toFixed(4)} SOL, Buy: ${volumeData.buyVolume.toFixed(4)} SOL`,
@@ -277,10 +285,9 @@ async function quickVolumeCheck(connection: Connection, mint: string): Promise<V
       new Promise((_, reject) => setTimeout(() => reject(new Error("Signature fetch timeout")), 6000)),
     ])) as any[]
 
-    const recentSigs = signatures.slice(0, 10) // Analyze fewer but more thoroughly
+    const recentSigs = signatures.slice(0, 10)
     console.log(`🔍 Analyzing ${recentSigs.length} recent transactions`)
 
-    // Process transactions in parallel for speed
     const analysisPromises = recentSigs.map(async (sigInfo) => {
       try {
         return await analyzeTransactionVolume(connection, sigInfo.signature, mint)
@@ -345,7 +352,6 @@ async function executeAutoSell(
       (async () => {
         const { POST: sellHandler } = await import("../sell/route")
 
-        // Create a proper mock NextRequest
         const mockRequest = new Request("http://localhost/api/sell", {
           method: "POST",
           headers: {
@@ -373,6 +379,121 @@ async function executeAutoSell(
   }
 }
 
+async function startBloXrouteStreaming(mint: string, wallets: Keypair[], percentage: number, slippageBps: number) {
+  if (!BLOXROUTE_API_KEY) {
+    console.error("❌ bloXroute API key not found")
+    return { success: false, error: "bloXroute API key required" }
+  }
+
+  console.log(`🚀 Starting bloXroute streaming for ${mint}`)
+
+  try {
+    const ws = new WebSocket(BLOXROUTE_WS_URL)
+
+    activeMonitoringSessions.set(mint, {
+      ws,
+      wallets,
+      percentage,
+      slippageBps,
+      startTime: Date.now(),
+    })
+
+    ws.on("open", () => {
+      console.log(`🔗 bloXroute WebSocket connected for ${mint}`)
+
+      const subscribeMessage = {
+        id: 1,
+        method: "subscribe",
+        params: [
+          "newTxs",
+          {
+            filters: `to:${mint} OR from:${mint}`,
+            include: ["tx_hash", "tx_contents"],
+          },
+        ],
+      }
+
+      ws.send(JSON.stringify(subscribeMessage))
+      console.log(`📡 Subscribed to transactions for ${mint}`)
+    })
+
+    ws.on("message", async (data) => {
+      try {
+        const message = JSON.parse(data.toString())
+
+        if (message.method === "subscribe" && message.params) {
+          const txData = message.params
+          console.log(`📥 New transaction detected for ${mint}`)
+
+          const isBuyTransaction = await analyzeBloXrouteTransaction(txData, mint)
+
+          if (isBuyTransaction) {
+            console.log(`🎯 Buy transaction detected! Executing auto-sell...`)
+
+            const session = activeMonitoringSessions.get(mint)
+            if (session) {
+              const sellResult = await executeAutoSell(
+                mint,
+                session.wallets,
+                session.percentage,
+                session.slippageBps,
+                0.01,
+              )
+              console.log(`✅ Auto-sell executed:`, sellResult)
+
+              ws.close()
+              activeMonitoringSessions.delete(mint)
+            }
+          }
+        }
+      } catch (error) {
+        console.error("❌ Error processing bloXroute message:", error)
+      }
+    })
+
+    ws.on("error", (error) => {
+      console.error(`❌ bloXroute WebSocket error for ${mint}:`, error)
+      activeMonitoringSessions.delete(mint)
+    })
+
+    ws.on("close", () => {
+      console.log(`🔌 bloXroute WebSocket closed for ${mint}`)
+      activeMonitoringSessions.delete(mint)
+    })
+
+    return {
+      success: true,
+      message: `bloXroute streaming started for ${mint}`,
+      status: "streaming_active",
+    }
+  } catch (error) {
+    console.error("❌ Failed to start bloXroute streaming:", error)
+    return { success: false, error: error.message }
+  }
+}
+
+async function analyzeBloXrouteTransaction(txData: any, mint: string): Promise<boolean> {
+  try {
+    const txContent = txData.tx_contents || txData.txContents
+    if (!txContent) return false
+
+    const hasJupiterInteraction =
+      txContent.includes("JUP") || txContent.includes("Jupiter") || txContent.includes("swap")
+
+    const hasTokenMint = txContent.includes(mint)
+
+    if (hasJupiterInteraction && hasTokenMint) {
+      console.log(`🎯 Detected Jupiter swap for ${mint}`)
+      return true
+    }
+
+    return false
+  } catch (error) {
+    console.error("❌ Error analyzing bloXroute transaction:", error)
+    return false
+  }
+}
+
 async function handleNetflowMode(mint: string, privateKeys: string[], percentage: number, slippageBps: number) {
   const wallets: Keypair[] = []
   for (const pk of privateKeys) {
@@ -390,26 +511,30 @@ async function handleNetflowMode(mint: string, privateKeys: string[], percentage
     return Response.json({ error: "No valid wallets provided" }, { status: 400 })
   }
 
-  console.log(`🚀 Starting auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
+  console.log(`🚀 Starting bloXroute auto-sell monitoring for ${mint} with ${wallets.length} wallets`)
 
-  // Start the monitoring process without awaiting
-  startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
-    .then((result) => {
-      console.log("Auto-sell completed:", result)
-    })
-    .catch((error) => {
-      console.error("Auto-sell failed:", error)
-    })
+  const streamingResult = await startBloXrouteStreaming(mint, wallets, percentage, slippageBps)
 
-  // Return immediate response to prevent UI hanging
+  if (!streamingResult.success) {
+    console.log("⚠️ bloXroute failed, falling back to RPC polling")
+    startVolumeBasedAutoSell(mint, wallets, percentage, slippageBps)
+      .then((result) => {
+        console.log("Auto-sell completed:", result)
+      })
+      .catch((error) => {
+        console.error("Auto-sell failed:", error)
+      })
+  }
+
   return Response.json({
     success: true,
-    message: `Auto-sell monitoring started for ${mint} with ${wallets.length} wallets`,
-    status: "monitoring_started",
+    message: streamingResult.success
+      ? `bloXroute streaming started for ${mint} with ${wallets.length} wallets`
+      : `RPC monitoring started for ${mint} with ${wallets.length} wallets (bloXroute fallback)`,
+    status: streamingResult.success ? "streaming_active" : "monitoring_started",
     mint,
     wallets: wallets.length,
-    percentage,
-    slippageBps,
+    method: streamingResult.success ? "bloxroute_streaming" : "rpc_polling",
   })
 }
 
@@ -430,7 +555,6 @@ export async function POST(request: NextRequest) {
 
     const { trades, mint, privateKeys, percentage = 25, slippageBps = 2000, mode = "netflow" } = parsed.data
 
-    // Handle trade ingestion for volume tracking
     if (trades && trades.length > 0) {
       let buyers = 0,
         sellers = 0
@@ -444,7 +568,6 @@ export async function POST(request: NextRequest) {
 
       lastPush = { buyers_usd: buyers, sellers_usd: sellers, at: now, window_seconds: WINDOW_SECONDS }
 
-      // Immediate sell on each buy (perbuy mode)
       if (mode === "perbuy" && mint && privateKeys) {
         for (const trade of trades) {
           if (trade.side !== "buy" || trade.usd <= 0) continue
@@ -456,7 +579,7 @@ export async function POST(request: NextRequest) {
           const payload = {
             mint,
             privateKeys,
-            percentage: 25, // 25% of token balance
+            percentage: 25,
             slippageBps,
             reason: "perbuy",
             buy_usd: trade.usd,
@@ -479,7 +602,6 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Handle netflow mode auto-sell
     if (mode === "netflow" && mint && privateKeys) {
       const pushed = lastPush
       let buyers_usd = 0,
@@ -512,7 +634,6 @@ export async function POST(request: NextRequest) {
         })
       }
 
-      // Calculate sell amount as 25% of net positive volume
       const sellUsd = net * NET_FRACTION
       const sellTokens = await tokensFromUsd(sellUsd, mint)
 
@@ -528,7 +649,7 @@ export async function POST(request: NextRequest) {
       const payload = {
         mint,
         privateKeys,
-        percentage: 25, // 25% of token balance
+        percentage: 25,
         slippageBps,
         reason: "netflow",
         net_usd: net,
@@ -563,7 +684,6 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // Fallback to original volume monitoring if no trades provided
     if (!trades && mint && privateKeys) {
       return await handleNetflowMode(mint, privateKeys, percentage, slippageBps)
     }
