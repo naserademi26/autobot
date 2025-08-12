@@ -20,7 +20,8 @@ import {
   DollarSign,
   Clock,
   Target,
-  ShoppingCart,
+  TrendingUp,
+  BarChart3,
 } from "lucide-react"
 
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
@@ -33,10 +34,11 @@ interface TokenInfo {
 
 interface AutoSellConfig {
   mint: string
+  timeWindowSeconds: number // Time window for tracking buy/sell activity
+  sellPercentageOfNetFlow: number // Percentage of net USD flow to sell
+  minNetFlowUsd: number // Minimum net flow to trigger sell
   cooldownSeconds: number
   slippageBps: number
-  sellPercentage: number // Percentage of holdings to sell when profitable
-  minProfitPercent: number // Minimum profit percentage to trigger sell
 }
 
 interface AutoSellStatus {
@@ -45,18 +47,14 @@ interface AutoSellStatus {
   metrics: {
     totalBought: number
     totalSold: number
-    avgBuyPrice: number
     currentPrice: number
-    unrealizedPnL: number
+    currentPriceUsd: number
+    solPriceUsd: number
+    netUsdFlow: number // Net USD flow (buyers - sellers) in time window
+    buyVolumeUsd: number // Total buy volume in USD in time window
+    sellVolumeUsd: number // Total sell volume in USD in time window
+    lastSellTrigger: number // Timestamp of last sell trigger
   }
-  recentBuyTransactions: Array<{
-    signature: string
-    timestamp: number
-    walletAddress: string
-    solSpent: number
-    tokensReceived: number
-    pricePerToken: number
-  }>
   walletStatus: Array<{
     name: string
     publicKey: string
@@ -64,10 +62,6 @@ interface AutoSellStatus {
     tokenBalance: number
     cooldownUntil: number
     lastTransactionSignature: string
-    totalBought: number
-    totalSold: number
-    avgBuyPrice: number
-    buyTransactionCount: number
   }>
 }
 
@@ -111,18 +105,28 @@ export default function AutoSellDashboard() {
 
   const [config, setConfig] = useState<AutoSellConfig>({
     mint: "",
+    timeWindowSeconds: 120, // 2 minutes time window
+    sellPercentageOfNetFlow: 25, // Sell 25% of net USD flow
+    minNetFlowUsd: 10, // Minimum $10 net flow to trigger
     cooldownSeconds: 30,
-    slippageBps: 100,
-    sellPercentage: 25, // Sell 25% of holdings when profitable
-    minProfitPercent: 5, // Minimum 5% profit to trigger sell
+    slippageBps: 300,
   })
 
   // Auto-sell status
   const [status, setStatus] = useState<AutoSellStatus>({
     isRunning: false,
     config: null,
-    metrics: { totalBought: 0, totalSold: 0, avgBuyPrice: 0, currentPrice: 0, unrealizedPnL: 0 },
-    recentBuyTransactions: [],
+    metrics: {
+      totalBought: 0,
+      totalSold: 0,
+      currentPrice: 0,
+      currentPriceUsd: 0,
+      solPriceUsd: 100,
+      netUsdFlow: 0,
+      buyVolumeUsd: 0,
+      sellVolumeUsd: 0,
+      lastSellTrigger: 0,
+    },
     walletStatus: [],
   })
 
@@ -263,7 +267,7 @@ export default function AutoSellDashboard() {
 
   async function startAutoSell() {
     setLoading(true)
-    setLog(`🚀 Starting auto-sell engine...`)
+    setLog(`🚀 Starting market momentum auto-sell engine...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
@@ -281,7 +285,7 @@ export default function AutoSellDashboard() {
       setLog(JSON.stringify(result, null, 2))
 
       if (res.ok) {
-        setLog(`✅ Auto-sell engine started successfully!`)
+        setLog(`✅ Market momentum auto-sell engine started successfully!`)
       }
     } catch (e: any) {
       setLog(`❌ Error: ${e?.message || String(e)}`)
@@ -322,12 +326,17 @@ export default function AutoSellDashboard() {
     [connected, selected, balances],
   )
 
+  const timeSinceLastSell =
+    status.metrics.lastSellTrigger > 0 ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000) : 0
+
   return (
     <div className="max-w-7xl mx-auto p-6 space-y-6">
       <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold gradient-text">🤖 Solana Auto-Sell Engine</h1>
-          <p className="text-slate-400 text-sm">Tracks your actual buy transactions and sells when profitable</p>
+          <h1 className="text-3xl font-bold gradient-text">🤖 Market Momentum Auto-Sell</h1>
+          <p className="text-slate-400 text-sm">
+            Monitors market buy/sell activity and sells {config.sellPercentageOfNetFlow}% of net positive USD flow
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
@@ -340,7 +349,7 @@ export default function AutoSellDashboard() {
             variant={status.isRunning ? "default" : "secondary"}
             className={status.isRunning ? "bg-green-600 animate-pulse" : "bg-gray-600"}
           >
-            {status.isRunning ? "🟢 RUNNING" : "🔴 STOPPED"}
+            {status.isRunning ? "🟢 MONITORING" : "🔴 STOPPED"}
           </Badge>
         </div>
       </header>
@@ -417,7 +426,7 @@ export default function AutoSellDashboard() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Target className="w-5 h-5" />
-                Token & Settings
+                Market Momentum Settings
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -440,30 +449,42 @@ export default function AutoSellDashboard() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label>Sell Percentage</Label>
+                  <Label>Time Window (sec)</Label>
+                  <Input
+                    type="number"
+                    min="60"
+                    max="600"
+                    value={config.timeWindowSeconds}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, timeWindowSeconds: Number(e.target.value) }))}
+                  />
+                  <p className="text-xs text-slate-400 mt-1">Track buy/sell activity</p>
+                </div>
+                <div>
+                  <Label>Sell % of Net Flow</Label>
                   <Input
                     type="number"
                     min="1"
                     max="100"
-                    value={config.sellPercentage}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, sellPercentage: Number(e.target.value) }))}
+                    value={config.sellPercentageOfNetFlow}
+                    onChange={(e) =>
+                      setConfig((prev) => ({ ...prev, sellPercentageOfNetFlow: Number(e.target.value) }))
+                    }
                   />
-                  <p className="text-xs text-slate-400 mt-1">% of holdings to sell</p>
-                </div>
-                <div>
-                  <Label>Min Profit %</Label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={config.minProfitPercent}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, minProfitPercent: Number(e.target.value) }))}
-                  />
-                  <p className="text-xs text-slate-400 mt-1">Minimum profit to sell</p>
+                  <p className="text-xs text-slate-400 mt-1">% of net USD flow</p>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Min Net Flow ($)</Label>
+                  <Input
+                    type="number"
+                    min="1"
+                    value={config.minNetFlowUsd}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, minNetFlowUsd: Number(e.target.value) }))}
+                  />
+                  <p className="text-xs text-slate-400 mt-1">Minimum trigger amount</p>
+                </div>
                 <div>
                   <Label>Cooldown (sec)</Label>
                   <Input
@@ -472,15 +493,16 @@ export default function AutoSellDashboard() {
                     onChange={(e) => setConfig((prev) => ({ ...prev, cooldownSeconds: Number(e.target.value) }))}
                   />
                 </div>
-                <div>
-                  <Label>Slippage (bps)</Label>
-                  <Input
-                    type="number"
-                    value={config.slippageBps}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
-                  />
-                  <p className="text-xs text-slate-400 mt-1">100 bps = 1%</p>
-                </div>
+              </div>
+
+              <div>
+                <Label>Slippage (bps)</Label>
+                <Input
+                  type="number"
+                  value={config.slippageBps}
+                  onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
+                />
+                <p className="text-xs text-slate-400 mt-1">300 bps = 3%</p>
               </div>
             </CardContent>
           </Card>
@@ -511,9 +533,11 @@ export default function AutoSellDashboard() {
 
               {status.config && (
                 <div className="text-xs text-slate-400 space-y-1">
-                  <div>Sell: {status.config.sellPercentage}% when profitable</div>
-                  <div>Min Profit: {status.config.minProfitPercent}%</div>
+                  <div>Window: {status.config.timeWindowSeconds}s</div>
+                  <div>Sell: {status.config.sellPercentageOfNetFlow}% of net flow</div>
+                  <div>Min Trigger: ${status.config.minNetFlowUsd}</div>
                   <div>Cooldown: {status.config.cooldownSeconds}s</div>
+                  <div className="text-yellow-400">Sells tokens for SOL based on market momentum</div>
                 </div>
               )}
             </CardContent>
@@ -525,33 +549,49 @@ export default function AutoSellDashboard() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <Card className="bg-green-900/20 border-green-600/50">
               <CardContent className="p-4 text-center">
-                <ShoppingCart className="w-8 h-8 mx-auto mb-2 text-green-400" />
-                <div className="text-2xl font-bold text-green-400">{status.metrics.totalBought.toFixed(2)}</div>
-                <div className="text-sm text-green-300">Tokens Bought</div>
+                <TrendingUp className="w-8 h-8 mx-auto mb-2 text-green-400" />
+                <div className="text-2xl font-bold text-green-400">${status.metrics.buyVolumeUsd.toFixed(0)}</div>
+                <div className="text-sm text-green-300">Buy Volume</div>
+                <div className="text-xs text-slate-400">{config.timeWindowSeconds}s window</div>
               </CardContent>
             </Card>
 
             <Card className="bg-red-900/20 border-red-600/50">
               <CardContent className="p-4 text-center">
                 <TrendingDown className="w-8 h-8 mx-auto mb-2 text-red-400" />
-                <div className="text-2xl font-bold text-red-400">{status.metrics.totalSold.toFixed(2)}</div>
-                <div className="text-sm text-red-300">Tokens Sold</div>
+                <div className="text-2xl font-bold text-red-400">${status.metrics.sellVolumeUsd.toFixed(0)}</div>
+                <div className="text-sm text-red-300">Sell Volume</div>
+                <div className="text-xs text-slate-400">{config.timeWindowSeconds}s window</div>
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`${status.metrics.netUsdFlow >= 0 ? "bg-green-900/20 border-green-600/50" : "bg-red-900/20 border-red-600/50"}`}
+            >
+              <CardContent className="p-4 text-center">
+                <BarChart3
+                  className={`w-8 h-8 mx-auto mb-2 ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}
+                />
+                <div
+                  className={`text-2xl font-bold ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}
+                >
+                  {status.metrics.netUsdFlow >= 0 ? "+" : ""}${status.metrics.netUsdFlow.toFixed(0)}
+                </div>
+                <div className={`text-sm ${status.metrics.netUsdFlow >= 0 ? "text-green-300" : "text-red-300"}`}>
+                  Net Flow
+                </div>
+                <div className="text-xs text-slate-400">
+                  {status.metrics.netUsdFlow >= config.minNetFlowUsd ? "🟢 Above threshold" : "🔴 Below threshold"}
+                </div>
               </CardContent>
             </Card>
 
             <Card className="bg-blue-900/20 border-blue-600/50">
               <CardContent className="p-4 text-center">
                 <DollarSign className="w-8 h-8 mx-auto mb-2 text-blue-400" />
-                <div className="text-2xl font-bold text-blue-400">{status.metrics.avgBuyPrice.toFixed(6)}</div>
-                <div className="text-sm text-blue-300">Avg Buy Price (SOL)</div>
-              </CardContent>
-            </Card>
-
-            <Card className="bg-yellow-900/20 border-yellow-600/50">
-              <CardContent className="p-4 text-center">
-                <Activity className="w-8 h-8 mx-auto mb-2 text-yellow-400" />
-                <div className="text-2xl font-bold text-yellow-400">{status.metrics.currentPrice.toFixed(6)}</div>
-                <div className="text-sm text-yellow-300">Current Price (SOL)</div>
+                <div className="text-2xl font-bold text-blue-400">${status.metrics.currentPriceUsd.toFixed(6)}</div>
+                <div className="text-sm text-blue-300">Current Price</div>
+                <div className="text-xs text-slate-400">{status.metrics.currentPrice.toFixed(8)} SOL</div>
               </CardContent>
             </Card>
           </div>
@@ -559,37 +599,59 @@ export default function AutoSellDashboard() {
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <ShoppingCart className="w-5 h-5" />
-                Your Buy Transactions
+                <Activity className="w-5 h-5" />
+                Market Activity Monitor
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {status.recentBuyTransactions.length === 0 ? (
-                <div className="text-center py-8 text-slate-400">
-                  <ShoppingCart className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>No buy transactions detected yet</p>
-                  <p className="text-sm">System will track your actual token purchases</p>
+              <div className="grid grid-cols-2 gap-6">
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Buy Pressure:</span>
+                    <span className="text-green-400 font-mono">${status.metrics.buyVolumeUsd.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Sell Pressure:</span>
+                    <span className="text-red-400 font-mono">${status.metrics.sellVolumeUsd.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Net Flow:</span>
+                    <span className={`font-mono ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {status.metrics.netUsdFlow >= 0 ? "+" : ""}${status.metrics.netUsdFlow.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
-              ) : (
-                <div className="space-y-2 max-h-60 overflow-auto">
-                  {status.recentBuyTransactions.map((tx, idx) => (
-                    <div key={idx} className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg">
-                      <div className="flex items-center gap-3">
-                        <ShoppingCart className="w-4 h-4 text-green-400" />
-                        <div>
-                          <div className="font-mono text-xs text-slate-300">
-                            {tx.walletAddress.slice(0, 8)}...{tx.walletAddress.slice(-4)}
-                          </div>
-                          <div className="text-xs text-slate-400">{new Date(tx.timestamp).toLocaleTimeString()}</div>
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="font-mono text-white text-sm">{tx.tokensReceived.toFixed(2)} tokens</div>
-                        <div className="font-mono text-slate-400 text-xs">{tx.solSpent.toFixed(4)} SOL</div>
-                        <div className="font-mono text-blue-400 text-xs">{tx.pricePerToken.toFixed(8)} SOL/token</div>
-                      </div>
-                    </div>
-                  ))}
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Trigger Threshold:</span>
+                    <span className="text-yellow-400 font-mono">${config.minNetFlowUsd}</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Sell Amount:</span>
+                    <span className="text-blue-400 font-mono">
+                      ${Math.max(0, (status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-400">Last Sell:</span>
+                    <span className="text-slate-300 font-mono">
+                      {status.metrics.lastSellTrigger > 0 ? `${timeSinceLastSell}s ago` : "Never"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {status.metrics.netUsdFlow >= config.minNetFlowUsd && (
+                <div className="mt-4 p-3 bg-green-900/20 border border-green-600/50 rounded-lg">
+                  <div className="flex items-center gap-2 text-green-400">
+                    <TrendingUp className="w-4 h-4" />
+                    <span className="font-semibold">SELL TRIGGER ACTIVE</span>
+                  </div>
+                  <p className="text-sm text-green-300 mt-1">
+                    Net buying pressure detected! Will sell {config.sellPercentageOfNetFlow}% of $
+                    {status.metrics.netUsdFlow.toFixed(2)} = $
+                    {((status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)} worth of tokens
+                  </p>
                 </div>
               )}
             </CardContent>
@@ -599,7 +661,7 @@ export default function AutoSellDashboard() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Wallet className="w-5 h-5" />
-                Wallet Status & Trading History
+                Wallet Status
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -628,7 +690,7 @@ export default function AutoSellDashboard() {
                           )}
                         </Badge>
                       </div>
-                      <div className="grid grid-cols-2 gap-4 text-sm mb-2">
+                      <div className="grid grid-cols-2 gap-4 text-sm">
                         <div>
                           <span className="text-slate-400">SOL: </span>
                           <span className="text-white font-mono">{wallet.balance.toFixed(4)}</span>
@@ -638,26 +700,6 @@ export default function AutoSellDashboard() {
                           <span className="text-white font-mono">{wallet.tokenBalance.toFixed(2)}</span>
                         </div>
                       </div>
-                      <div className="grid grid-cols-3 gap-2 text-xs">
-                        <div className="bg-green-900/20 p-2 rounded text-center">
-                          <div className="text-green-400 font-mono">{wallet.totalBought.toFixed(2)}</div>
-                          <div className="text-green-300">Bought</div>
-                        </div>
-                        <div className="bg-red-900/20 p-2 rounded text-center">
-                          <div className="text-red-400 font-mono">{wallet.totalSold.toFixed(2)}</div>
-                          <div className="text-red-300">Sold</div>
-                        </div>
-                        <div className="bg-blue-900/20 p-2 rounded text-center">
-                          <div className="text-blue-400 font-mono">{wallet.buyTransactionCount}</div>
-                          <div className="text-blue-300">Buys</div>
-                        </div>
-                      </div>
-                      {wallet.avgBuyPrice > 0 && (
-                        <div className="mt-2 text-xs">
-                          <span className="text-slate-400">Avg Buy Price: </span>
-                          <span className="text-blue-400 font-mono">{wallet.avgBuyPrice.toFixed(8)} SOL</span>
-                        </div>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -673,7 +715,7 @@ export default function AutoSellDashboard() {
             <CardContent>
               <pre className="text-xs whitespace-pre-wrap bg-black/30 p-4 rounded-lg max-h-40 overflow-auto">
                 {log ||
-                  "System ready. The auto-sell engine will track your actual buy transactions and sell when profitable."}
+                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when above $${config.minNetFlowUsd} threshold.`}
               </pre>
             </CardContent>
           </Card>
