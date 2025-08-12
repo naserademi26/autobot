@@ -1,122 +1,89 @@
-import { getWindowSumsUSD } from "../lib/helius-netflow"
-import { computeSellAmountTokensFromNetUsd } from "../lib/jupiter-price"
-// Fixed import path from ./sell/route to ../sell/route
-import { POST as sellHandler } from "../sell/route"
+import { readLastPush } from "./ingest-trade"
 
-const TRIGGER_MODE = (process.env.TRIGGER_MODE || "netflow").toLowerCase()
-const COOLDOWN_SECONDS = Number(process.env.COOLDOWN_SECONDS ?? "0") // Default 0 for faster execution
-const COOLDOWN_MS = COOLDOWN_SECONDS * 1000
-const NET_FLOW_MIN_USD = Number(process.env.NET_FLOW_MIN_USD ?? "0") // Default 0 to trigger on any positive flow
-const NET_FRACTION = Number(process.env.NET_FRACTION ?? "0.25") // 25%
+const NET_FLOW_MIN_USD = Number(process.env.NET_FLOW_MIN_USD ?? "0")
+const WINDOW_SECONDS = Number(process.env.WINDOW_SECONDS ?? "120")
+const COOLDOWN_MS = Number(process.env.COOLDOWN_SECONDS ?? "0") * 1000
+const NET_FRACTION = Number(process.env.NET_FRACTION ?? "0.25")
+const MINT_ADDRESS = process.env.AUTO_SELL_MINT || process.env.MINT_ADDRESS!
 
-let lastSellAt = 0 // in-memory cooldown tracking
+let lastSellAt = 0
+
+async function getUsdPerBaseUnit(mint: string): Promise<number> {
+  const QUOTE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
+  const JUP_BASE = "https://quote-api.jup.ag"
+
+  const key = process.env.JUPITER_API_KEY || process.env.NEXT_PUBLIC_JUPITER_API_KEY || process.env.JUP_API_KEY
+  const headers = key
+    ? { "Content-Type": "application/json", "X-API-KEY": key }
+    : { "Content-Type": "application/json" }
+
+  const url = `${JUP_BASE}/v6/quote?inputMint=${mint}&outputMint=${QUOTE_MINT}&amount=1000000&slippageBps=50`
+  const res = await fetch(url, { cache: "no-store", headers })
+
+  if (!res.ok) return 0
+  const data = await res.json()
+  const route = data?.data?.[0]
+  if (!route) return 0
+
+  const outAmount = Number(route.outAmount)
+  const inAmount = Number(route.inAmount)
+  if (!outAmount || !inAmount) return 0
+
+  return outAmount / inAmount
+}
+
+async function computeSellAmountFromNetUsd(netUsd: number): Promise<bigint> {
+  if (netUsd <= 0) return BigInt(0)
+  const sellUsd = netUsd * NET_FRACTION // 25% of net_usd
+  const usdcPerBase = await getUsdPerBaseUnit(MINT_ADDRESS)
+  if (usdcPerBase <= 0) return BigInt(0)
+  const baseUnits = Math.floor(sellUsd / usdcPerBase)
+  return BigInt(baseUnits)
+}
+
+async function getWindowSumsUSD(mint: string): Promise<{ buyers_usd: number; sellers_usd: number }> {
+  // TODO: Implement actual Helius enriched transaction parsing
+  return { buyers_usd: 0, sellers_usd: 0 }
+}
 
 export const config = { runtime: "nodejs" }
 
-export default async function handler(req: Request) {
-  try {
-    // Skip if in perbuy mode (handled by ingest-trade)
-    if (TRIGGER_MODE === "perbuy") {
-      return new Response(JSON.stringify({ ok: true, mode: "perbuy", reason: "handled by ingest-trade" }))
-    }
+export default async function handler(_req: Request) {
+  const pushed = readLastPush()
+  let buyers_usd = 0,
+    sellers_usd = 0
 
-    // Get active auto-sell configuration
-    const mintAddress = process.env.AUTO_SELL_MINT
-    const privateKeys = process.env.AUTO_SELL_WALLETS?.split(",") || []
-
-    if (!mintAddress || !privateKeys.length) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          reason: "no auto-sell config",
-          mintAddress: !!mintAddress,
-          walletsCount: privateKeys.length,
-        }),
-      )
-    }
-
-    // Get buy/sell volume from Helius
-    const { buyers_usd, sellers_usd } = await getWindowSumsUSD(mintAddress)
-    const net = buyers_usd - sellers_usd
-
-    if (net <= 0 || net <= NET_FLOW_MIN_USD) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          reason: "net non-positive or below threshold",
-          net,
-          threshold: NET_FLOW_MIN_USD,
-          buyers_usd,
-          sellers_usd,
-        }),
-      )
-    }
-
-    if (Date.now() - lastSellAt < COOLDOWN_MS) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          reason: "cooldown",
-          net,
-          cooldownRemaining: Math.ceil((COOLDOWN_MS - (Date.now() - lastSellAt)) / 1000),
-        }),
-      )
-    }
-
-    // Calculate sell amount in tokens (25% of net USD volume)
-    const sellAmountTokens = await computeSellAmountTokensFromNetUsd(mintAddress, net)
-
-    // Changed 0n to BigInt(0) for ES2019 compatibility
-    if (sellAmountTokens <= BigInt(0)) {
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          reason: "sell amount = 0",
-          net,
-        }),
-      )
-    }
-
-    // Convert token amount to percentage of wallet balance for sell handler
-    const sellPercentage = Math.min(NET_FRACTION * 100, 100) // Use configured fraction as percentage
-
-    // Execute sell via existing sell handler
-    const sellRequest = new Request("http://localhost:3000/api/sell", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mint: mintAddress,
-        privateKeys,
-        percentage: sellPercentage,
-        slippageBps: 2000, // 20% slippage for auto-sell
-      }),
-    })
-
-    const sellResponse = await sellHandler(sellRequest)
-    const sellResult = await sellResponse.json()
-
-    lastSellAt = Date.now()
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        mode: "netflow",
-        net,
-        buyers_usd,
-        sellers_usd,
-        sellPercentage,
-        sellAmountTokens: sellAmountTokens.toString(),
-        sellResult,
-      }),
-    )
-  } catch (error) {
-    console.error("Auto-sell tick error:", error)
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: error instanceof Error ? error.message : "Unknown error",
-      }),
-      { status: 500 },
-    )
+  if (pushed && Date.now() - pushed.at <= pushed.window_seconds * 1000 + 2000) {
+    buyers_usd = pushed.buyers_usd
+    sellers_usd = pushed.sellers_usd
+  } else {
+    const sums = await getWindowSumsUSD(MINT_ADDRESS)
+    buyers_usd = sums.buyers_usd
+    sellers_usd = sums.sellers_usd
   }
+
+  const net = buyers_usd - sellers_usd
+  const cooldownLeftMs = Math.max(0, COOLDOWN_MS - (Date.now() - lastSellAt))
+
+  const amountBaseUnits = net > 0 ? await computeSellAmountFromNetUsd(net) : BigInt(0)
+
+  const decision = {
+    mode: "netflow",
+    window_seconds: WINDOW_SECONDS,
+    buyers_usd,
+    sellers_usd,
+    net_usd: net,
+    should_sell: net > NET_FLOW_MIN_USD && cooldownLeftMs === 0 && amountBaseUnits > BigInt(0),
+    mint: MINT_ADDRESS,
+    amount: amountBaseUnits.toString(), // token base units to sell
+    cooldown_left_ms: cooldownLeftMs,
+    sell_fraction: NET_FRACTION,
+    sell_usd: net > 0 ? net * NET_FRACTION : 0,
+  }
+
+  if (decision.should_sell) lastSellAt = Date.now()
+
+  return new Response(JSON.stringify(decision), {
+    headers: { "Content-Type": "application/json" },
+  })
 }
