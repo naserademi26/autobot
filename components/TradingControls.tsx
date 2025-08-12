@@ -151,7 +151,7 @@ export function TradingControls({ walletManager, trading, solPrice }: TradingCon
         </div>
 
         {/* Sell Buttons */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
           <Button
             onClick={() => handleSell(25)}
             disabled={trading.isTrading || walletsWithTokens.length === 0}
@@ -172,6 +172,13 @@ export function TradingControls({ walletManager, trading, solPrice }: TradingCon
             className="bg-red-600 hover:bg-red-700 text-white font-bold"
           >
             {trading.isTrading ? <Loader2 className="w-4 h-4 animate-spin" /> : "🔥 75%"}
+          </Button>
+          <Button
+            onClick={() => handleSell(95)}
+            disabled={trading.isTrading || walletsWithTokens.length === 0}
+            className="bg-red-700 hover:bg-red-800 text-white font-bold"
+          >
+            {trading.isTrading ? <Loader2 className="w-4 h-4 animate-spin" /> : "🔥 95%"}
           </Button>
           <Button
             onClick={() => handleSell(100)}

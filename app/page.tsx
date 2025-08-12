@@ -404,7 +404,43 @@ export default function Home() {
           <p className="text-xs text-slate-400">2000 bps = 20%. Higher slippage = faster fills on new launches.</p>
 
           {activeTab === "buy" ? (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <label className="block text-xs text-slate-400">Buy percentage of SOL balance:</label>
+                <div className="grid grid-cols-5 gap-2">
+                  <button
+                    onClick={() => setBuyPerc(25)}
+                    className={`btn text-xs py-2 ${buyPerc === 25 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    25%
+                  </button>
+                  <button
+                    onClick={() => setBuyPerc(50)}
+                    className={`btn text-xs py-2 ${buyPerc === 50 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    50%
+                  </button>
+                  <button
+                    onClick={() => setBuyPerc(75)}
+                    className={`btn text-xs py-2 ${buyPerc === 75 ? "bg-blue-600 hover:bg-blue-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    75%
+                  </button>
+                  <button
+                    onClick={() => setBuyPerc(95)}
+                    className={`btn text-xs py-2 ${buyPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    95%
+                  </button>
+                  <button
+                    onClick={() => setBuyPerc(100)}
+                    className={`btn text-xs py-2 ${buyPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    100%
+                  </button>
+                </div>
+                <div className="text-xs text-slate-400">Selected: {buyPerc}% of available SOL balance</div>
+              </div>
               <button
                 className="btn w-full bg-blue-600 hover:bg-blue-500"
                 disabled={loading || !mint || Object.values(selected).every((v) => !v)}
@@ -414,7 +450,43 @@ export default function Home() {
               </button>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <label className="block text-xs text-slate-400">Sell percentage of token balance:</label>
+                <div className="grid grid-cols-5 gap-2">
+                  <button
+                    onClick={() => setSellPerc(25)}
+                    className={`btn text-xs py-2 ${sellPerc === 25 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    25%
+                  </button>
+                  <button
+                    onClick={() => setSellPerc(50)}
+                    className={`btn text-xs py-2 ${sellPerc === 50 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    50%
+                  </button>
+                  <button
+                    onClick={() => setSellPerc(75)}
+                    className={`btn text-xs py-2 ${sellPerc === 75 ? "bg-orange-600 hover:bg-orange-500" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    75%
+                  </button>
+                  <button
+                    onClick={() => setSellPerc(95)}
+                    className={`btn text-xs py-2 ${sellPerc === 95 ? "bg-red-700 hover:bg-red-600" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    95%
+                  </button>
+                  <button
+                    onClick={() => setSellPerc(100)}
+                    className={`btn text-xs py-2 ${sellPerc === 100 ? "bg-red-800 hover:bg-red-700" : "bg-slate-700 hover:bg-slate-600"}`}
+                  >
+                    100%
+                  </button>
+                </div>
+                <div className="text-xs text-slate-400">Selected: {sellPerc}% of available token balance</div>
+              </div>
               <button
                 className="btn w-full bg-orange-600 hover:bg-orange-500"
                 disabled={loading || !mint || Object.values(selected).every((v) => !v)}

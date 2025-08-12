@@ -133,7 +133,7 @@ export function SimpleTradingPanel({ wallets, selectedWallets }: SimpleTradingPa
                       </Badge>
                     </div>
 
-                    <div className="grid grid-cols-4 gap-1">
+                    <div className="grid grid-cols-5 gap-1">
                       <Button
                         onClick={() => handleSellWallet(wallet, 25)}
                         disabled={isTrading || !tokenMint.trim()}
@@ -157,6 +157,14 @@ export function SimpleTradingPanel({ wallets, selectedWallets }: SimpleTradingPa
                         className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
                       >
                         {isTrading ? <Loader2 className="w-3 h-3 animate-spin" /> : "75%"}
+                      </Button>
+                      <Button
+                        onClick={() => handleSellWallet(wallet, 95)}
+                        disabled={isTrading || !tokenMint.trim()}
+                        size="sm"
+                        className="bg-red-700 hover:bg-red-800 text-white text-xs font-bold"
+                      >
+                        {isTrading ? <Loader2 className="w-3 h-3 animate-spin" /> : "95%"}
                       </Button>
                       <Button
                         onClick={() => handleSellWallet(wallet, 100)}

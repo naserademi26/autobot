@@ -397,6 +397,14 @@ export function UltraFastTradingPanel({ wallets, selectedWallets }: UltraFastTra
                 <TrendingDown className="h-4 w-4 mr-1" />🔥 75%
               </Button>
               <Button
+                onClick={() => handleSell(95)}
+                disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
+                variant="outline"
+                className="border-red-600 text-red-400 hover:bg-red-900/20"
+              >
+                <TrendingDown className="h-4 w-4 mr-1" />🔥 95%
+              </Button>
+              <Button
                 onClick={() => handleSell(100)}
                 disabled={isTrading || !tokenMint.trim() || selectedConnectedWallets.length === 0}
                 variant="outline"
