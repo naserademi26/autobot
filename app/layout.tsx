@@ -1,16 +1,19 @@
 import "./globals.css"
 import type { ReactNode } from "react"
+import { ErrorBoundary } from "@/components/ErrorBoundary"
 
 export const metadata = {
-  title: "Solana Sniper 65",
-  description: "Multi-wallet sniper with smooth UI",
-    generator: 'v0.dev'
+  title: "Solana Auto-Sell Bot",
+  description: "Market momentum auto-sell system for Solana tokens",
+  generator: "v0.dev",
 }
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <ErrorBoundary>{children}</ErrorBoundary>
+      </body>
     </html>
   )
 }

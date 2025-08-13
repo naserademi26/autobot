@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import bs58 from "bs58"
 import { Connection, PublicKey } from "@solana/web3.js"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -22,6 +22,7 @@ import {
   Target,
   TrendingUp,
   BarChart3,
+  AlertTriangle,
 } from "lucide-react"
 
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
@@ -88,8 +89,17 @@ function sanitizeMintInput(input: string): string {
 }
 
 export default function AutoSellDashboard() {
-  const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
+  const connection = useMemo(() => {
+    try {
+      return new Connection(ENDPOINT, { commitment: "confirmed" })
+    } catch (error) {
+      console.error("Failed to create connection:", error)
+      return null
+    }
+  }, [])
+
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   // Wallet management
   const [vaultKeys, setVaultKeys] = useState<string>("")
@@ -136,22 +146,32 @@ export default function AutoSellDashboard() {
 
   useEffect(() => {
     let mounted = true
-    ;(async () => {
+    if (!connection) {
+      if (mounted) setRpcOk(false)
+      return
+    }
+
+    const checkConnection = async () => {
       try {
         await connection.getLatestBlockhash("confirmed")
-        if (mounted) setRpcOk(true)
-      } catch {
-        if (mounted) setRpcOk(false)
+        if (mounted) {
+          setRpcOk(true)
+          setError(null)
+        }
+      } catch (err) {
+        console.error("RPC connection failed:", err)
+        if (mounted) {
+          setRpcOk(false)
+          setError("RPC connection failed")
+        }
       }
-    })()
+    }
+
+    checkConnection()
     return () => {
       mounted = false
     }
   }, [connection])
-
-  useEffect(() => {
-    setConfig((prev) => ({ ...prev, mint }))
-  }, [mint])
 
   useEffect(() => {
     const interval = setInterval(async () => {
@@ -160,117 +180,170 @@ export default function AutoSellDashboard() {
         if (res.ok) {
           const data = await res.json()
           setStatus(data)
+          setError(null)
+        } else {
+          console.error("Status fetch failed:", res.status, res.statusText)
         }
       } catch (error) {
         console.error("Failed to fetch status:", error)
+        setError("Failed to fetch status")
       }
     }, 2000)
 
     return () => clearInterval(interval)
   }, [])
 
-  async function addVault() {
-    const lines = vaultKeys
-      .split(/\r?\n/)
-      .map((s) => s.trim())
-      .filter(Boolean)
+  const addVault = useCallback(async () => {
+    try {
+      const lines = vaultKeys
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean)
 
-    const items: VaultEntry[] = []
-    for (const line of lines) {
-      try {
-        const { Keypair } = await import("@solana/web3.js")
-        let kp
-        if (line.startsWith("[")) {
-          const arr = Uint8Array.from(JSON.parse(line))
-          kp = Keypair.fromSecretKey(arr)
-        } else {
-          const secret = bs58.decode(line)
-          kp = Keypair.fromSecretKey(secret)
+      const items: VaultEntry[] = []
+      for (const line of lines) {
+        try {
+          const { Keypair } = await import("@solana/web3.js")
+          let kp
+          if (line.startsWith("[")) {
+            const arr = Uint8Array.from(JSON.parse(line))
+            kp = Keypair.fromSecretKey(arr)
+          } else {
+            const secret = bs58.decode(line)
+            kp = Keypair.fromSecretKey(secret)
+          }
+          items.push({ pubkey: kp.publicKey.toBase58(), hasSecret: true, sk: line })
+        } catch (err) {
+          console.warn("Invalid wallet key:", err)
         }
-        items.push({ pubkey: kp.publicKey.toBase58(), hasSecret: true, sk: line })
-      } catch {
-        // ignore invalid entries
       }
+
+      const map = new Map<string, VaultEntry>()
+      for (const w of [...connected, ...items]) map.set(w.pubkey, w)
+      const next = Array.from(map.values()).slice(0, 120)
+      setConnected(next)
+
+      const sel: Record<string, boolean> = { ...selected }
+      next.forEach((w) => (sel[w.pubkey] = true))
+      setSelected(sel)
+      setVaultKeys("")
+      setError(null)
+    } catch (err) {
+      console.error("Failed to add wallets:", err)
+      setError("Failed to add wallets")
     }
+  }, [vaultKeys, connected, selected])
 
-    const map = new Map<string, VaultEntry>()
-    for (const w of [...connected, ...items]) map.set(w.pubkey, w)
-    const next = Array.from(map.values()).slice(0, 120)
-    setConnected(next)
-
-    const sel: Record<string, boolean> = { ...selected }
-    next.forEach((w) => (sel[w.pubkey] = true))
-    setSelected(sel)
-    setVaultKeys("")
-  }
-
-  async function resolveTokenMeta(mintAddr: string) {
+  const resolveTokenMeta = useCallback(async (mintAddr: string) => {
     try {
       setToken({})
       if (!mintAddr) return
-      const j = await fetch("https://token.jup.ag/all").then((r) => r.json())
-      const found = (j as any[]).find((t: any) => t.address === mintAddr)
-      if (found) return setToken({ name: found.name, symbol: found.symbol, source: "jup" })
 
-      const p = await fetch(`https://frontend-api.pump.fun/coins/${mintAddr}`).then((r) => (r.ok ? r.json() : null))
-      if (p && p.symbol) return setToken({ name: p.name, symbol: p.symbol, source: "pump" })
+      // Try Jupiter first
+      try {
+        const j = await fetch("https://token.jup.ag/all", {
+          signal: AbortSignal.timeout(5000),
+        }).then((r) => r.json())
+        const found = (j as any[]).find((t: any) => t.address === mintAddr)
+        if (found) {
+          setToken({ name: found.name, symbol: found.symbol, source: "jup" })
+          return
+        }
+      } catch (err) {
+        console.warn("Jupiter API failed:", err)
+      }
+
+      // Try Pump.fun as fallback
+      try {
+        const p = await fetch(`https://frontend-api.pump.fun/coins/${mintAddr}`, {
+          signal: AbortSignal.timeout(5000),
+        }).then((r) => (r.ok ? r.json() : null))
+        if (p && p.symbol) {
+          setToken({ name: p.name, symbol: p.symbol, source: "pump" })
+          return
+        }
+      } catch (err) {
+        console.warn("Pump.fun API failed:", err)
+      }
 
       setToken({ name: undefined, symbol: undefined, source: "unknown" })
-    } catch {
+    } catch (err) {
+      console.error("Failed to resolve token metadata:", err)
       setToken({ source: "unknown" })
     }
-  }
+  }, [])
 
   useEffect(() => {
-    if (mint) void resolveTokenMeta(mint)
-  }, [mint])
+    if (mint) {
+      resolveTokenMeta(mint).catch(console.error)
+    }
+  }, [mint, resolveTokenMeta])
 
-  async function refreshBalances() {
+  const refreshBalances = useCallback(async () => {
+    if (!connection) {
+      setError("No RPC connection")
+      return
+    }
+
     const cur = ++refreshId.current
     const pubkeys = connected.map((w) => w.pubkey)
     if (pubkeys.length === 0) {
       setBalances({})
       return
     }
+
     setBalancesLoading(true)
     try {
       const next: Record<string, number> = {}
       const chunkSize = 99
       for (let i = 0; i < pubkeys.length; i += chunkSize) {
         const slice = pubkeys.slice(i, i + chunkSize)
-        const infos = await connection.getMultipleAccountsInfo(
-          slice.map((s) => new PublicKey(s)),
-          { commitment: "confirmed" },
-        )
-        infos.forEach((info, idx) => {
-          const key = slice[idx]
-          const lamports = info?.lamports ?? 0
-          next[key] = lamports / 1e9
-        })
+        try {
+          const infos = await connection.getMultipleAccountsInfo(
+            slice.map((s) => new PublicKey(s)),
+            { commitment: "confirmed" },
+          )
+          infos.forEach((info, idx) => {
+            const key = slice[idx]
+            const lamports = info?.lamports ?? 0
+            next[key] = lamports / 1e9
+          })
+        } catch (err) {
+          console.error("Failed to fetch balances for chunk:", err)
+          // Continue with other chunks
+        }
         if (cur !== refreshId.current) return
       }
-      if (cur === refreshId.current) setBalances(next)
+      if (cur === refreshId.current) {
+        setBalances(next)
+        setError(null)
+      }
+    } catch (err) {
+      console.error("Failed to refresh balances:", err)
+      setError("Failed to refresh balances")
     } finally {
       if (cur === refreshId.current) setBalancesLoading(false)
     }
-  }
+  }, [connection, connected])
 
   useEffect(() => {
-    void refreshBalances()
-  }, [connected, connection])
+    refreshBalances().catch(console.error)
+  }, [refreshBalances])
 
-  function toggleAll(v: boolean) {
-    const s: Record<string, boolean> = {}
-    connected.forEach((w) => (s[w.pubkey] = v))
-    setSelected(s)
-  }
-
-  async function startAutoSell() {
+  const startAutoSell = useCallback(async () => {
     setLoading(true)
     setLog(`🚀 Starting market momentum auto-sell engine...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
+
+      if (keys.length === 0) {
+        throw new Error("No wallets selected with private keys")
+      }
+
+      if (!mint) {
+        throw new Error("No token mint address provided")
+      }
 
       const res = await fetch("/api/auto-sell/start", {
         method: "POST",
@@ -279,41 +352,63 @@ export default function AutoSellDashboard() {
           config,
           privateKeys: keys,
         }),
+        signal: AbortSignal.timeout(30000), // 30 second timeout
       })
 
       const result = await res.json()
-      setLog(JSON.stringify(result, null, 2))
 
       if (res.ok) {
         setLog(`✅ Market momentum auto-sell engine started successfully!`)
+        setError(null)
+      } else {
+        throw new Error(result.error || `HTTP ${res.status}`)
       }
     } catch (e: any) {
-      setLog(`❌ Error: ${e?.message || String(e)}`)
+      const errorMsg = e?.message || String(e)
+      setLog(`❌ Error: ${errorMsg}`)
+      setError(errorMsg)
+      console.error("Start auto-sell failed:", e)
     } finally {
       setLoading(false)
     }
-  }
+  }, [connected, selected, config, mint])
 
-  async function stopAutoSell() {
+  const stopAutoSell = useCallback(async () => {
     setLoading(true)
     setLog(`⏹️ Stopping auto-sell engine...`)
 
     try {
       const res = await fetch("/api/auto-sell/stop", {
         method: "POST",
+        signal: AbortSignal.timeout(10000), // 10 second timeout
       })
 
       const result = await res.json()
-      setLog(JSON.stringify(result, null, 2))
 
       if (res.ok) {
         setLog(`✅ Auto-sell engine stopped successfully!`)
+        setError(null)
+      } else {
+        throw new Error(result.error || `HTTP ${res.status}`)
       }
     } catch (e: any) {
-      setLog(`❌ Error: ${e?.message || String(e)}`)
+      const errorMsg = e?.message || String(e)
+      setLog(`❌ Error: ${errorMsg}`)
+      setError(errorMsg)
+      console.error("Stop auto-sell failed:", e)
     } finally {
       setLoading(false)
     }
+  }, [])
+
+  useEffect(() => {
+    setConfig((prev) => ({ ...prev, mint }))
+  }, [mint])
+
+  function toggleAll(v: boolean) {
+    const s: Record<string, boolean> = {}
+    connected.forEach((w) => (s[w.pubkey] = v))
+    setSelected(s)
   }
 
   const selectedCount = useMemo(() => Object.values(selected).filter(Boolean).length, [selected])
@@ -338,6 +433,12 @@ export default function AutoSellDashboard() {
             <p className="text-slate-300 text-base leading-relaxed">
               Monitors market buy/sell activity and sells {config.sellPercentageOfNetFlow}% of net positive USD flow
             </p>
+            {error && (
+              <div className="flex items-center gap-2 text-rose-400 text-sm bg-rose-900/20 px-3 py-2 rounded-lg border border-rose-600/50">
+                <AlertTriangle className="w-4 h-4" />
+                {error}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-4">
             <div className="rounded-xl border border-slate-700 bg-slate-800/80 backdrop-blur-sm px-4 py-3 text-sm shadow-lg">
