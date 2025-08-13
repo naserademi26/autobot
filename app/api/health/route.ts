@@ -16,93 +16,40 @@ const BXR_SUBMIT = process.env.BLOXROUTE_SUBMIT_URL || "https://global.solana.de
 const JUP_BASE = process.env.JUP_BASE || "https://api.jup.ag"
 const JUP_API_KEY = process.env.JUP_API_KEY || process.env.JUPITER_API_KEY || "e2f280df-aa16-4c78-979c-6468f660dbfb"
 
-const healthCache = {
-  lastCheck: 0,
-  data: null as any,
-  ttl: 10000, // 10 seconds cache
-}
-
 export async function GET() {
-  const now = Date.now()
+  const out: any = {}
 
-  if (healthCache.data && now - healthCache.lastCheck < healthCache.ttl) {
-    return NextResponse.json(healthCache.data)
-  }
-
-  const out: any = {
-    status: "healthy",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    autoSell: {
-      running: false,
-      wallets: 0,
-      lastActivity: null,
-    },
-  }
-
-  try {
-    const { autoSellState } = await import("../auto-sell/start/route")
-    out.autoSell = {
-      running: autoSellState.isRunning,
-      wallets: autoSellState.wallets?.length || 0,
-      lastActivity: autoSellState.metrics?.lastSellTrigger || null,
-      memoryWarnings: autoSellState.memoryUsage?.warnings || 0,
-      peakMemoryMB: Math.round((autoSellState.memoryUsage?.peakRSS || 0) / 1024 / 1024),
-    }
-  } catch (e) {
-    // Auto-sell module not loaded yet
-  }
-
+  // RPC test
   try {
     const conn = new Connection(HELIUS_RPC_URL, { commitment: "confirmed" })
-    const bh = (await Promise.race([
-      conn.getLatestBlockhash("confirmed"),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 8000)),
-    ])) as any
+    const bh = await conn.getLatestBlockhash("confirmed")
     out.rpc = { ok: true, lastValidBlockHeight: bh.lastValidBlockHeight }
   } catch (e: any) {
     out.rpc = { ok: false, error: e?.message || String(e) }
   }
 
+  // Jupiter quote test (SOL->SOL minimal amount just to check reachability)
   try {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 5000)
-
     const url = `${JUP_BASE}/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=So11111111111111111111111111111111111111112&amount=1000&slippageBps=10`
-    const res = await fetch(url, {
-      headers: { "X-API-Key": JUP_API_KEY, Accept: "application/json" },
-      signal: controller.signal,
-    })
-
-    clearTimeout(timeoutId)
+    const res = await fetch(url, { headers: { "X-API-Key": JUP_API_KEY, Accept: "application/json" } })
     out.jupiter = { ok: res.ok, status: res.status }
   } catch (e: any) {
     out.jupiter = { ok: false, error: e?.message || String(e) }
   }
 
+  // bloXroute reachability (GET home should return non-network error or 200/4xx)
   try {
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 5000)
-
-    const resRegion = await fetch(BXR_REGION, {
-      method: "GET",
-      signal: controller.signal,
-    })
-
-    clearTimeout(timeoutId)
+    const resRegion = await fetch(BXR_REGION, { method: "GET" })
+    const resSubmit = await fetch(BXR_SUBMIT, { method: "GET" })
     out.bloxroute = {
       regionReachable: true,
       regionStatus: resRegion.status,
-      submitReachable: true, // Assume submit works if region works
-      submitStatus: 200,
+      submitReachable: true,
+      submitStatus: resSubmit.status,
     }
   } catch (e: any) {
     out.bloxroute = { reachable: false, error: e?.message || String(e) }
   }
-
-  healthCache.lastCheck = now
-  healthCache.data = out
 
   return NextResponse.json(out)
 }

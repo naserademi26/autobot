@@ -3,17 +3,11 @@ import { autoSellState } from "../start/route"
 
 export async function GET() {
   try {
-    const isActuallyRunning =
-      autoSellState.isRunning &&
-      autoSellState.analysisInterval !== null &&
-      autoSellState.wallets &&
-      autoSellState.wallets.length > 0
-
     return NextResponse.json({
-      isRunning: isActuallyRunning,
+      isRunning: autoSellState.isRunning,
       config: autoSellState.config,
       metrics: autoSellState.metrics,
-      recentMarketActivity: autoSellState.marketTrades?.slice(-20) || [],
+      recentMarketActivity: autoSellState.marketTrades?.slice(-20) || [], // Last 20 market trades
       walletStatus:
         autoSellState.wallets?.map((wallet) => ({
           name: wallet.name,
@@ -27,12 +21,6 @@ export async function GET() {
           avgBuyPrice: wallet.avgBuyPrice || 0,
           buyTransactionCount: wallet.buyHistory?.length || 0,
         })) || [],
-      debug: {
-        hasAnalysisInterval: autoSellState.analysisInterval !== null,
-        walletCount: autoSellState.wallets?.length || 0,
-        lastActivity: autoSellState.lastActivityTime || null,
-        engineStartTime: autoSellState.engineStartTime || null,
-      },
     })
   } catch (error) {
     console.error("Error getting auto-sell status:", error)
