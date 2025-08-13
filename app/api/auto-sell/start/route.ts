@@ -333,19 +333,19 @@ async function startConfigurableAnalysisCycle() {
 
 async function collectMarketDataForConfigurableWindow() {
   try {
-    console.log(`[AUTO-SELL] Collecting market data for ${autoSellState.config.timeWindowSeconds}s window...`)
+    console.log("[AUTO-SELL] 🔍 Collecting market data...")
 
-    // Reset metrics for new analysis window
+    // Reset metrics
     autoSellState.metrics.buyVolumeUsd = 0
     autoSellState.metrics.sellVolumeUsd = 0
     autoSellState.metrics.netUsdFlow = 0
 
-    // Try Bitquery first, then fallback to other sources
+    // Use direct Solana RPC monitoring instead of Bitquery
     try {
-      await collectBitqueryPrimaryData()
-      console.log("[AUTO-SELL] ✅ Market data collected via Bitquery")
-    } catch (bitqueryError) {
-      console.warn("[AUTO-SELL] ⚠️ Bitquery failed, using fallback data:", bitqueryError.message)
+      await collectSolanaRpcData()
+      console.log("[AUTO-SELL] ✅ Market data collected via Solana RPC")
+    } catch (rpcError) {
+      console.warn("[AUTO-SELL] ⚠️ Solana RPC failed, using fallback:", rpcError.message)
 
       // Fallback to basic price monitoring
       try {
@@ -356,18 +356,13 @@ async function collectMarketDataForConfigurableWindow() {
       }
     }
 
-    // Calculate net flow
-    autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
+    // Update token price
+    await updateTokenPrice()
 
-    console.log(
-      `[AUTO-SELL] Market data: Buy $${autoSellState.metrics.buyVolumeUsd.toFixed(2)}, Sell $${autoSellState.metrics.sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-    )
+    // Analyze and execute if conditions are met
+    await analyzeAndExecuteAutoSell()
   } catch (error) {
-    console.error("[AUTO-SELL] Market data collection error:", error)
-    // Don't throw, just set zero values
-    autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
+    console.error("[AUTO-SELL] ❌ Market data collection failed:", error.message)
   }
 }
 
@@ -693,187 +688,173 @@ async function collectSolanaRpcData() {
     throw new Error(`Failed to connect to any RPC endpoint. Last error: ${lastError?.message}`)
   }
 
-  return connection
-}
-
-async function collectBitqueryPrimaryData() {
   try {
-    console.log("[BITQUERY] Starting data collection...")
-
+    const tokenMint = new PublicKey(autoSellState.config.mint)
     const monitoringStartTime = autoSellState.monitoringStartTime || autoSellState.botStartTime
-    const currentTime = new Date().toISOString()
-    const startTime = new Date(monitoringStartTime).toISOString()
 
-    console.log(`[BITQUERY] Monitoring transactions from ${startTime} to ${currentTime}`)
+    console.log(
+      `[SOLANA-RPC] Monitoring transactions for ${autoSellState.config.mint} since ${new Date(monitoringStartTime).toISOString()}`,
+    )
 
-    const query = `
-      query {
-        Solana(dataset: realtime) {
-          DEXTradeByTokens(
-            where: {
-              Trade: {
-                Currency: {
-                  MintAddress: {is: "${autoSellState.config.mint}"}
-                }
-              }
-              Block: {
-                Time: {since: "${startTime}", till: "${currentTime}"}
-              }
-            }
-          ) {
-            Trade {
-              Side {
-                Type
-                AmountInUSD
-                Amount
-              }
-              Currency {
-                MintAddress
-                Symbol
-                Name
-              }
-            }
-            Block {
-              Time
-            }
-            Transaction {
-              Signature
-            }
-          }
-        }
-      }
-    `
-
-    const response = await fetch("https://streaming.bitquery.io/eap", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization:
-          "Bearer ory_at_hF4Y8YRKZtHeQ7xb91dd4Js7AZtma2CW91KrLwq1bOc.T4cX0fgDAEQGIkrntsJoYqlV2cnsuzICfhuT9Y0ZAyk",
-      },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(15000),
+    // Get recent signatures for the token mint
+    const signatures = await connection.getSignaturesForAddress(tokenMint, {
+      limit: 100,
+      commitment: "confirmed",
     })
 
-    if (!response.ok) {
-      throw new Error(`Bitquery HTTP ${response.status}: ${response.statusText}`)
-    }
-
-    const data = await response.json()
-
-    if (data.errors) {
-      throw new Error(`Bitquery GraphQL errors: ${JSON.stringify(data.errors)}`)
-    }
-
-    const trades = data.data?.Solana?.DEXTradeByTokens || []
+    console.log(`[SOLANA-RPC] Found ${signatures.length} recent signatures`)
 
     let buyVolumeUsd = 0
     let sellVolumeUsd = 0
     const processedTransactions = new Set()
+    let validTransactionCount = 0
 
-    console.log(`[BITQUERY] Processing ${trades.length} raw trades...`)
+    // Get current SOL price for USD calculations
+    const solPriceUsd = await getCurrentSolPrice()
+    console.log(`[SOLANA-RPC] Current SOL price: $${solPriceUsd}`)
 
-    trades.forEach((trade: any, index: number) => {
-      const side = trade.Trade?.Side
-      const amountUSD = Number.parseFloat(side?.AmountInUSD || 0)
-      const signature = trade.Transaction?.Signature
-      const timestamp = trade.Block?.Time
-
-      // Skip duplicate transactions
-      if (signature && processedTransactions.has(signature)) {
-        console.log(`[BITQUERY] Skipping duplicate transaction: ${signature}`)
-        return
+    for (const sigInfo of signatures) {
+      // Only process transactions that occurred after monitoring started
+      const txTime = sigInfo.blockTime * 1000 // Convert to milliseconds
+      if (txTime < monitoringStartTime) {
+        continue
       }
 
-      if (signature) {
-        processedTransactions.add(signature)
+      // Skip if already processed
+      if (processedTransactions.has(sigInfo.signature)) {
+        continue
       }
 
-      console.log(
-        `[BITQUERY] Trade ${index + 1}: Type=${side?.Type}, Amount=$${amountUSD.toFixed(2)}, Time=${timestamp}, Sig=${signature?.substring(0, 8)}...`,
-      )
+      try {
+        const transaction = await connection.getParsedTransaction(sigInfo.signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        })
 
-      if (amountUSD > 0) {
-        if (side?.Type === "buy") {
-          buyVolumeUsd += amountUSD
-          console.log(`[BITQUERY] ✅ BUY: $${amountUSD.toFixed(2)} (Total: $${buyVolumeUsd.toFixed(2)})`)
-        } else if (side?.Type === "sell") {
-          sellVolumeUsd += amountUSD
-          console.log(`[BITQUERY] ❌ SELL: $${amountUSD.toFixed(2)} (Total: $${sellVolumeUsd.toFixed(2)})`)
+        if (!transaction || transaction.meta?.err) {
+          continue
         }
+
+        processedTransactions.add(sigInfo.signature)
+
+        // Analyze transaction for token swaps
+        const swapData = analyzeTokenSwapTransaction(transaction, tokenMint.toString(), solPriceUsd)
+
+        if (swapData) {
+          validTransactionCount++
+          const timestamp = new Date(txTime).toISOString()
+
+          if (swapData.type === "buy") {
+            buyVolumeUsd += swapData.amountUsd
+            console.log(
+              `[SOLANA-RPC] ✅ BUY: $${swapData.amountUsd.toFixed(2)} at ${timestamp} (${sigInfo.signature.substring(0, 8)}...)`,
+            )
+          } else if (swapData.type === "sell") {
+            sellVolumeUsd += swapData.amountUsd
+            console.log(
+              `[SOLANA-RPC] ❌ SELL: $${swapData.amountUsd.toFixed(2)} at ${timestamp} (${sigInfo.signature.substring(0, 8)}...)`,
+            )
+          }
+        }
+      } catch (txError) {
+        console.warn(`[SOLANA-RPC] Failed to process transaction ${sigInfo.signature}:`, txError.message)
       }
-    })
+    }
 
     autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
     autoSellState.metrics.netUsdFlow = buyVolumeUsd - sellVolumeUsd
 
+    console.log(`[SOLANA-RPC] ✅ Processed ${validTransactionCount} valid transactions`)
     console.log(
-      `[BITQUERY] ✅ Final results: ${processedTransactions.size} unique transactions, Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      `[SOLANA-RPC] Final results: Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
     )
 
     if (buyVolumeUsd > 0) {
-      console.log(`[BITQUERY] 🎯 Detected buying pressure: $${buyVolumeUsd.toFixed(2)} - should match DexTools data`)
+      console.log(
+        `[SOLANA-RPC] 🎯 Real buying pressure detected: $${buyVolumeUsd.toFixed(2)} - matches blockchain data`,
+      )
     }
   } catch (error) {
-    console.error("[BITQUERY] Data collection failed:", error.message)
-
-    try {
-      await collectDexScreenerFallbackData()
-      console.log("[BITQUERY] ✅ Using DexScreener fallback data")
-    } catch (fallbackError) {
-      console.error("[BITQUERY] Fallback also failed:", fallbackError.message)
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
-    }
+    console.error("[SOLANA-RPC] Transaction monitoring failed:", error.message)
+    throw error
   }
 }
 
-async function collectDexScreenerFallbackData() {
+function analyzeTokenSwapTransaction(transaction: any, tokenMint: string, solPriceUsd: number) {
   try {
-    const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
-    const data = await response.json()
+    const instructions = transaction.transaction.message.instructions
+    const preBalances = transaction.meta.preBalances
+    const postBalances = transaction.meta.postBalances
+    const accounts = transaction.transaction.message.accountKeys
 
-    if (data.pairs && data.pairs.length > 0) {
-      const pair = data.pairs[0]
-      const volume24h = Number.parseFloat(pair.volume?.h24 || 0)
-      const priceChange24h = Number.parseFloat(pair.priceChange?.h24 || 0)
+    // Look for SOL balance changes to determine buy/sell
+    let solChange = 0
+    let tokenChange = 0
 
-      // Estimate buy/sell pressure based on price movement and volume
-      const timeWindowRatio = autoSellState.config.timeWindowSeconds / (24 * 60 * 60) // Convert to 24h ratio
-      const estimatedVolume = volume24h * timeWindowRatio
-
-      if (priceChange24h > 0) {
-        // Positive price change suggests more buying
-        const buyRatio = Math.min(0.7, 0.5 + priceChange24h / 100)
-        autoSellState.metrics.buyVolumeUsd = estimatedVolume * buyRatio
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * (1 - buyRatio)
-      } else {
-        // Negative price change suggests more selling
-        const sellRatio = Math.min(0.7, 0.5 + Math.abs(priceChange24h) / 100)
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * sellRatio
-        autoSellState.metrics.buyVolumeUsd = estimatedVolume * (1 - sellRatio)
+    // Calculate SOL balance changes
+    for (let i = 0; i < preBalances.length; i++) {
+      const change = (postBalances[i] - preBalances[i]) / 1e9 // Convert lamports to SOL
+      if (Math.abs(change) > 0.001) {
+        // Ignore dust
+        solChange += change
       }
-
-      autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
-
-      // Update price as well
-      const priceUsd = Number.parseFloat(pair.priceUsd || 0)
-      if (priceUsd > 0) {
-        autoSellState.metrics.currentPriceUsd = priceUsd
-        autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
-      }
-
-      console.log(
-        `[DEXSCREENER] ✅ Fallback data: Buy $${autoSellState.metrics.buyVolumeUsd.toFixed(2)}, Sell $${autoSellState.metrics.sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-      )
-    } else {
-      throw new Error("No trading pairs found")
     }
+
+    // Look for token balance changes in parsed instructions
+    const tokenBalanceChanges = transaction.meta.postTokenBalances || []
+    const preTokenBalances = transaction.meta.preTokenBalances || []
+
+    for (const postBalance of tokenBalanceChanges) {
+      if (postBalance.mint === tokenMint) {
+        const preBalance = preTokenBalances.find(
+          (pre) => pre.accountIndex === postBalance.accountIndex && pre.mint === tokenMint,
+        )
+
+        if (preBalance) {
+          const change = Number(postBalance.uiTokenAmount.uiAmount) - Number(preBalance.uiTokenAmount.uiAmount)
+          if (Math.abs(change) > 0) {
+            tokenChange = change
+          }
+        }
+      }
+    }
+
+    // Determine if this is a buy or sell based on SOL and token changes
+    if (Math.abs(solChange) > 0.001 && Math.abs(tokenChange) > 0) {
+      const amountUsd = Math.abs(solChange) * solPriceUsd
+
+      if (solChange < 0 && tokenChange > 0) {
+        // SOL decreased, tokens increased = BUY
+        return { type: "buy", amountUsd, solAmount: Math.abs(solChange), tokenAmount: tokenChange }
+      } else if (solChange > 0 && tokenChange < 0) {
+        // SOL increased, tokens decreased = SELL
+        return { type: "sell", amountUsd, solAmount: Math.abs(solChange), tokenAmount: Math.abs(tokenChange) }
+      }
+    }
+
+    return null
   } catch (error) {
-    console.error("[DEXSCREENER] Fallback failed:", error.message)
-    throw error
+    console.warn("[SOLANA-RPC] Transaction analysis failed:", error.message)
+    return null
+  }
+}
+
+async function getCurrentSolPrice(): Promise<number> {
+  try {
+    const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", {
+      signal: AbortSignal.timeout(5000),
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    const data = await response.json()
+    return data.solana?.usd || 100 // Fallback to $100 if API fails
+  } catch (error) {
+    console.warn("[SOLANA-RPC] Failed to fetch SOL price, using fallback:", error.message)
+    return 100 // Fallback price
   }
 }
 
