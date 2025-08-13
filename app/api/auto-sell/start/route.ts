@@ -872,6 +872,150 @@ async function collectSolanaRpcData() {
 }
 
 async function collectBitqueryPrimaryData() {
-  // Placeholder for Bitquery data collection logic
-  console.log("[BITQUERY] Placeholder for Bitquery data collection logic")
+  try {
+    console.log("[BITQUERY] Starting data collection...")
+
+    const timeWindowMinutes = Math.ceil(autoSellState.config.timeWindowSeconds / 60)
+    const currentTime = new Date().toISOString()
+    const startTime = new Date(Date.now() - timeWindowMinutes * 60 * 1000).toISOString()
+
+    const query = `
+      query {
+        Solana(dataset: realtime) {
+          DEXTradeByTokens(
+            where: {
+              Trade: {
+                Currency: {
+                  MintAddress: {is: "${autoSellState.config.mint}"}
+                }
+              }
+              Block: {
+                Time: {since: "${startTime}", till: "${currentTime}"}
+              }
+            }
+          ) {
+            Trade {
+              Side {
+                Type
+                AmountInUSD
+                Amount
+              }
+              Currency {
+                MintAddress
+                Symbol
+                Name
+              }
+            }
+            Block {
+              Time
+            }
+          }
+        }
+      }
+    `
+
+    const response = await fetch("https://streaming.bitquery.io/eap", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Bearer ory_at_hF4Y8YRKZtHeQ7xb91dd4Js7AZtma2CW91KrLwq1bOc.T4cX0fgDAEQGIkrntsJoYqlV2cnsuzICfhuT9Y0ZAyk",
+      },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(15000),
+    })
+
+    if (!response.ok) {
+      throw new Error(`Bitquery HTTP ${response.status}: ${response.statusText}`)
+    }
+
+    const data = await response.json()
+
+    if (data.errors) {
+      throw new Error(`Bitquery GraphQL errors: ${JSON.stringify(data.errors)}`)
+    }
+
+    const trades = data.data?.Solana?.DEXTradeByTokens || []
+
+    let buyVolumeUsd = 0
+    let sellVolumeUsd = 0
+
+    trades.forEach((trade: any) => {
+      const side = trade.Trade?.Side
+      if (side?.Type === "buy" && side.AmountInUSD) {
+        buyVolumeUsd += Number.parseFloat(side.AmountInUSD)
+      } else if (side?.Type === "sell" && side.AmountInUSD) {
+        sellVolumeUsd += Number.parseFloat(side.AmountInUSD)
+      }
+    })
+
+    autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
+    autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
+    autoSellState.metrics.netUsdFlow = buyVolumeUsd - sellVolumeUsd
+
+    console.log(
+      `[BITQUERY] ✅ Collected ${trades.length} trades: Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+    )
+  } catch (error) {
+    console.error("[BITQUERY] Data collection failed:", error.message)
+
+    // Fallback to DexScreener data
+    try {
+      console.log("[BITQUERY] Using DexScreener fallback...")
+      await collectDexScreenerFallbackData()
+    } catch (fallbackError) {
+      console.error("[BITQUERY] Fallback also failed:", fallbackError.message)
+      // Set zero values to prevent startup failure
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
+    }
+  }
+}
+
+async function collectDexScreenerFallbackData() {
+  try {
+    const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
+    const data = await response.json()
+
+    if (data.pairs && data.pairs.length > 0) {
+      const pair = data.pairs[0]
+      const volume24h = Number.parseFloat(pair.volume?.h24 || 0)
+      const priceChange24h = Number.parseFloat(pair.priceChange?.h24 || 0)
+
+      // Estimate buy/sell pressure based on price movement and volume
+      const timeWindowRatio = autoSellState.config.timeWindowSeconds / (24 * 60 * 60) // Convert to 24h ratio
+      const estimatedVolume = volume24h * timeWindowRatio
+
+      if (priceChange24h > 0) {
+        // Positive price change suggests more buying
+        const buyRatio = Math.min(0.7, 0.5 + priceChange24h / 100)
+        autoSellState.metrics.buyVolumeUsd = estimatedVolume * buyRatio
+        autoSellState.metrics.sellVolumeUsd = estimatedVolume * (1 - buyRatio)
+      } else {
+        // Negative price change suggests more selling
+        const sellRatio = Math.min(0.7, 0.5 + Math.abs(priceChange24h) / 100)
+        autoSellState.metrics.sellVolumeUsd = estimatedVolume * sellRatio
+        autoSellState.metrics.buyVolumeUsd = estimatedVolume * (1 - sellRatio)
+      }
+
+      autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
+
+      // Update price as well
+      const priceUsd = Number.parseFloat(pair.priceUsd || 0)
+      if (priceUsd > 0) {
+        autoSellState.metrics.currentPriceUsd = priceUsd
+        autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
+      }
+
+      console.log(
+        `[DEXSCREENER] ✅ Fallback data: Buy $${autoSellState.metrics.buyVolumeUsd.toFixed(2)}, Sell $${autoSellState.metrics.sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      )
+    } else {
+      throw new Error("No trading pairs found")
+    }
+  } catch (error) {
+    console.error("[DEXSCREENER] Fallback failed:", error.message)
+    throw error
+  }
 }
