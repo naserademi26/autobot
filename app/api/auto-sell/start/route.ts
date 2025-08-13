@@ -32,6 +32,8 @@ const autoSellState = {
   },
   lastActivity: Date.now(),
   isServerless: true,
+  monitoringStartTime: 0,
+  analysisInterval: null as NodeJS.Timeout | null,
 }
 
 // Resource management and cleanup utilities
@@ -297,66 +299,32 @@ function monitorMemoryUsage() {
 
 async function startConfigurableAnalysisCycle() {
   try {
-    console.log("[AUTO-SELL] Starting configurable analysis cycle...")
+    console.log(`[AUTO-SELL] Starting analysis cycle with ${autoSellState.config.timeWindowSeconds}s intervals`)
 
-    try {
-      await updateSolPrice()
-      console.log("[AUTO-SELL] ✅ SOL price updated successfully")
-    } catch (priceError) {
-      console.warn("[AUTO-SELL] ⚠️ Initial SOL price update failed:", priceError)
-      // Set default SOL price to prevent startup failure
-      autoSellState.metrics.solPriceUsd = 100
-    }
+    const waitTime = autoSellState.config.timeWindowSeconds * 1000
+    console.log(`[AUTO-SELL] Waiting ${autoSellState.config.timeWindowSeconds} seconds before first analysis...`)
 
-    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
-    const timeWindowMs = timeWindowSeconds * 1000
+    setTimeout(async () => {
+      console.log("[AUTO-SELL] Starting first analysis cycle...")
+      // Set the monitoring start time to NOW (when we actually start monitoring)
+      autoSellState.monitoringStartTime = Date.now()
 
-    console.log(`[AUTO-SELL] Setting up ${timeWindowSeconds}-second analysis cycles...`)
-
-    console.log("[AUTO-SELL] Starting immediate market analysis...")
-
-    try {
+      // Run first analysis
       await collectMarketDataForConfigurableWindow()
-      console.log("[AUTO-SELL] ✅ Initial market data collection completed")
-    } catch (dataError) {
-      console.warn("[AUTO-SELL] ⚠️ Initial market data collection failed:", dataError)
-      // Initialize with zero values to prevent startup failure
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
-    }
-
-    try {
       await analyzeAndExecuteAutoSell()
-      console.log("[AUTO-SELL] ✅ Initial analysis completed")
-    } catch (analysisError) {
-      console.warn("[AUTO-SELL] ⚠️ Initial analysis failed:", analysisError)
-    }
 
-    const analysisInterval = setInterval(async () => {
-      if (!autoSellState.isRunning) {
-        clearInterval(analysisInterval)
-        ResourceManager.clearTimer(analysisInterval)
-        return
-      }
+      // Set up recurring analysis
+      autoSellState.analysisInterval = setInterval(async () => {
+        try {
+          await collectMarketDataForConfigurableWindow()
+          await analyzeAndExecuteAutoSell()
+        } catch (error) {
+          console.error("[AUTO-SELL] Analysis cycle error:", error)
+        }
+      }, waitTime)
 
-      autoSellState.lastActivity = Date.now()
-
-      try {
-        console.log(`[AUTO-SELL] Starting ${timeWindowSeconds}-second market analysis...`)
-        await collectMarketDataForConfigurableWindow()
-        await analyzeAndExecuteAutoSell()
-        console.log(`[AUTO-SELL] ✅ ${timeWindowSeconds}-second analysis completed`)
-      } catch (error) {
-        console.error(`[AUTO-SELL] ${timeWindowSeconds}-second analysis error:`, error)
-        // Don't stop the bot, just log the error and continue
-      }
-    }, timeWindowMs)
-
-    autoSellState.intervals.push(analysisInterval)
-    ResourceManager.addTimer(analysisInterval)
-
-    console.log("[AUTO-SELL] ✅ Analysis cycle started successfully")
+      console.log(`[AUTO-SELL] ✅ Analysis cycle started with ${autoSellState.config.timeWindowSeconds}s intervals`)
+    }, waitTime)
   } catch (error) {
     console.error("[AUTO-SELL] ❌ Failed to start analysis cycle:", error)
     throw error
@@ -676,6 +644,10 @@ function gracefulShutdown() {
     autoSellState.isRunning = false
     autoSellState.intervals.forEach((interval) => clearInterval(interval))
     autoSellState.intervals = []
+    if (autoSellState.analysisInterval) {
+      clearInterval(autoSellState.analysisInterval)
+      ResourceManager.clearTimer(autoSellState.analysisInterval)
+    }
     ResourceManager.cleanup()
   }
 
@@ -728,9 +700,11 @@ async function collectBitqueryPrimaryData() {
   try {
     console.log("[BITQUERY] Starting data collection...")
 
-    const timeWindowMinutes = Math.ceil(autoSellState.config.timeWindowSeconds / 60)
+    const monitoringStartTime = autoSellState.monitoringStartTime || autoSellState.botStartTime
     const currentTime = new Date().toISOString()
-    const startTime = new Date(Date.now() - timeWindowMinutes * 60 * 1000).toISOString()
+    const startTime = new Date(monitoringStartTime).toISOString()
+
+    console.log(`[BITQUERY] Monitoring transactions from ${startTime} to ${currentTime}`)
 
     const query = `
       query {
@@ -795,10 +769,16 @@ async function collectBitqueryPrimaryData() {
 
     trades.forEach((trade: any) => {
       const side = trade.Trade?.Side
-      if (side?.Type === "buy" && side.AmountInUSD) {
-        buyVolumeUsd += Number.parseFloat(side.AmountInUSD)
-      } else if (side?.Type === "sell" && side.AmountInUSD) {
-        sellVolumeUsd += Number.parseFloat(side.AmountInUSD)
+      const amountUSD = Number.parseFloat(side?.AmountInUSD || 0)
+
+      if (amountUSD > 0) {
+        if (side?.Type === "buy") {
+          buyVolumeUsd += amountUSD
+          console.log(`[BITQUERY] Real BUY: $${amountUSD.toFixed(2)}`)
+        } else if (side?.Type === "sell") {
+          sellVolumeUsd += amountUSD
+          console.log(`[BITQUERY] Real SELL: $${amountUSD.toFixed(2)}`)
+        }
       }
     })
 
@@ -807,22 +787,16 @@ async function collectBitqueryPrimaryData() {
     autoSellState.metrics.netUsdFlow = buyVolumeUsd - sellVolumeUsd
 
     console.log(
-      `[BITQUERY] ✅ Collected ${trades.length} trades: Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      `[BITQUERY] ✅ Real transactions: ${trades.length} trades, Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
     )
   } catch (error) {
     console.error("[BITQUERY] Data collection failed:", error.message)
 
-    // Fallback to DexScreener data
-    try {
-      console.log("[BITQUERY] Using DexScreener fallback...")
-      await collectDexScreenerFallbackData()
-    } catch (fallbackError) {
-      console.error("[BITQUERY] Fallback also failed:", fallbackError.message)
-      // Set zero values to prevent startup failure
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
-    }
+    autoSellState.metrics.buyVolumeUsd = 0
+    autoSellState.metrics.sellVolumeUsd = 0
+    autoSellState.metrics.netUsdFlow = 0
+
+    console.log("[BITQUERY] No real transaction data available, setting volumes to $0")
   }
 }
 
