@@ -658,10 +658,10 @@ export default function AutoSellDashboard() {
                     Net Flow
                   </div>
                   <div className="text-xs font-medium">
-                    {status.metrics.netUsdFlow >= config.minNetFlowUsd ? (
-                      <span className="text-emerald-300">🟢 Above threshold</span>
+                    {status.metrics.netUsdFlow > 0 ? (
+                      <span className="text-emerald-300">🟢 Positive flow</span>
                     ) : (
-                      <span className="text-slate-300">🔴 Below threshold</span>
+                      <span className="text-slate-300">🔴 No positive flow</span>
                     )}
                   </div>
                 </CardContent>
@@ -712,10 +712,6 @@ export default function AutoSellDashboard() {
                   </div>
                   <div className="space-y-4">
                     <div className="flex justify-between items-center p-3 bg-slate-800/50 rounded-lg border border-slate-600/30">
-                      <span className="text-slate-200 font-semibold">Trigger Threshold:</span>
-                      <span className="text-amber-300 font-mono font-bold text-lg">${config.minNetFlowUsd}</span>
-                    </div>
-                    <div className="flex justify-between items-center p-3 bg-slate-800/50 rounded-lg border border-slate-600/30">
                       <span className="text-slate-200 font-semibold">Sell Amount:</span>
                       <span className="text-blue-300 font-mono font-bold text-lg">
                         ${Math.max(0, (status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)}
@@ -730,7 +726,7 @@ export default function AutoSellDashboard() {
                   </div>
                 </div>
 
-                {status.metrics.netUsdFlow >= config.minNetFlowUsd && (
+                {status.metrics.netUsdFlow > 0 && status.metrics.buyVolumeUsd > 0 && (
                   <div className="mt-6 p-5 bg-gradient-to-r from-green-900/40 to-emerald-900/30 border border-green-500/50 rounded-xl shadow-xl">
                     <div className="flex items-center gap-3 text-green-300">
                       <TrendingUp className="w-6 h-6" />
@@ -874,7 +870,7 @@ export default function AutoSellDashboard() {
               <CardContent>
                 <pre className="text-sm whitespace-pre-wrap bg-black/60 border border-slate-500/50 p-4 rounded-xl max-h-40 overflow-auto font-mono text-slate-200 leading-relaxed">
                   {log ||
-                    `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when above $${config.minNetFlowUsd} threshold.`}
+                    `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when buy pressure is detected.`}
                 </pre>
               </CardContent>
             </Card>

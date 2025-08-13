@@ -520,14 +520,19 @@ async function collectDexScreenerData() {
 async function analyzeAndExecuteAutoSell() {
   try {
     const netUsdFlow = autoSellState.metrics.netUsdFlow
-    const minNetFlowUsd = autoSellState.config.minNetFlowUsd
+    const buyVolumeUsd = autoSellState.metrics.buyVolumeUsd
+    const sellVolumeUsd = autoSellState.metrics.sellVolumeUsd
     const cooldownMs = autoSellState.config.cooldownSeconds * 1000
     const currentTime = Date.now()
 
-    console.log(`[AUTO-SELL] Analysis - Net Flow: $${netUsdFlow.toFixed(2)}, Threshold: $${minNetFlowUsd}`)
+    console.log(
+      `[AUTO-SELL] Analysis - Buy Volume: $${buyVolumeUsd.toFixed(2)}, Sell Volume: $${sellVolumeUsd.toFixed(2)}, Net Flow: $${netUsdFlow.toFixed(2)}`,
+    )
 
-    if (netUsdFlow > minNetFlowUsd) {
-      console.log(`[AUTO-SELL] ✅ SELL CRITERIA MET! Net flow $${netUsdFlow.toFixed(2)} > threshold $${minNetFlowUsd}`)
+    if (netUsdFlow > 0 && buyVolumeUsd > 0) {
+      console.log(
+        `[AUTO-SELL] ✅ POSITIVE NET FLOW DETECTED! Buy: $${buyVolumeUsd.toFixed(2)} > Sell: $${sellVolumeUsd.toFixed(2)} = Net: +$${netUsdFlow.toFixed(2)}`,
+      )
 
       if (currentTime - autoSellState.metrics.lastSellTrigger < cooldownMs) {
         const remainingCooldown = Math.ceil((cooldownMs - (currentTime - autoSellState.metrics.lastSellTrigger)) / 1000)
@@ -537,7 +542,9 @@ async function analyzeAndExecuteAutoSell() {
 
       console.log(`[AUTO-SELL] 🚀 AUTOMATIC SELL TRIGGERED! Executing immediately...`)
       console.log(`[AUTO-SELL] 🎯 Sell Parameters:`)
-      console.log(`[AUTO-SELL]   - Net USD Flow: $${netUsdFlow.toFixed(2)}`)
+      console.log(`[AUTO-SELL]   - Buy Volume: $${buyVolumeUsd.toFixed(2)}`)
+      console.log(`[AUTO-SELL]   - Sell Volume: $${sellVolumeUsd.toFixed(2)}`)
+      console.log(`[AUTO-SELL]   - Net USD Flow: +$${netUsdFlow.toFixed(2)}`)
       console.log(`[AUTO-SELL]   - Sell Percentage: ${autoSellState.config.sellPercentageOfNetFlow}%`)
       console.log(
         `[AUTO-SELL]   - Target Sell Amount: $${((netUsdFlow * autoSellState.config.sellPercentageOfNetFlow) / 100).toFixed(2)}`,
@@ -567,10 +574,12 @@ async function analyzeAndExecuteAutoSell() {
         autoSellState.metrics.lastSellTrigger = 0
         throw sellError
       }
-    } else {
+    } else if (netUsdFlow <= 0) {
       console.log(
-        `[AUTO-SELL] ❌ Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd}, no automatic sell triggered`,
+        `[AUTO-SELL] ❌ No positive net flow detected. Buy: $${buyVolumeUsd.toFixed(2)}, Sell: $${sellVolumeUsd.toFixed(2)}, Net: $${netUsdFlow.toFixed(2)} - NO SELL TRIGGERED`,
       )
+    } else if (buyVolumeUsd <= 0) {
+      console.log(`[AUTO-SELL] ❌ No buy volume detected ($${buyVolumeUsd.toFixed(2)}) - NO SELL TRIGGERED`)
     }
   } catch (error) {
     console.error("[AUTO-SELL] ❌ CRITICAL ERROR in automatic sell analysis:", error)
