@@ -97,9 +97,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid configuration or no wallets provided" }, { status: 400 })
     }
 
-    ResourceManager.cleanup()
-    autoSellState.intervals.forEach((interval) => clearInterval(interval))
-    autoSellState.intervals = []
+    try {
+      ResourceManager.cleanup()
+      autoSellState.intervals.forEach((interval) => clearInterval(interval))
+      autoSellState.intervals = []
+      console.log("[AUTO-SELL] Cleanup completed successfully")
+    } catch (cleanupError) {
+      console.warn("[AUTO-SELL] Cleanup warning:", cleanupError)
+    }
 
     // Initialize wallets
     const { Keypair } = await import("@solana/web3.js")
@@ -128,6 +133,7 @@ export async function POST(request: NextRequest) {
           tokenBalance: 0,
           lastTransactionSignature: "",
         })
+        console.log(`[AUTO-SELL] Successfully parsed wallet ${i + 1}: ${keypair.publicKey.toBase58()}`)
       } catch (error) {
         console.error(`Failed to parse wallet ${i}:`, error)
       }
@@ -137,28 +143,39 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No valid wallets could be parsed" }, { status: 400 })
     }
 
-    // Update global state
     autoSellState.config = {
       ...config,
-      timeWindowSeconds: config.timeWindowSeconds || 30, // Changed from 120 to 30 seconds for faster reaction
-      sellPercentageOfNetFlow: config.sellPercentageOfNetFlow || 25, // Default 25% of net flow
-      minNetFlowUsd: config.minNetFlowUsd || 10, // Minimum $10 net flow to trigger
-      cooldownSeconds: config.cooldownSeconds || 15, // Reduced from 30 to 15 seconds for faster execution
-      slippageBps: config.slippageBps || 300, // Default slippage
+      timeWindowSeconds: config.timeWindowSeconds || 30,
+      sellPercentageOfNetFlow: config.sellPercentageOfNetFlow || 25,
+      cooldownSeconds: config.cooldownSeconds || 15,
+      slippageBps: config.slippageBps || 300,
     }
     autoSellState.wallets = wallets
     autoSellState.marketTrades = []
     autoSellState.isRunning = true
 
+    console.log("[AUTO-SELL] Configuration set successfully")
     console.log("[AUTO-SELL] Fetching wallet balances immediately...")
-    await updateAllWalletBalances()
 
-    // Start monitoring and execution intervals
-    await startAutoSellEngine()
+    try {
+      await updateAllWalletBalances()
+      console.log("[AUTO-SELL] Initial wallet balance fetch completed")
+    } catch (balanceError) {
+      console.warn("[AUTO-SELL] Initial balance fetch failed, will retry:", balanceError)
+    }
+
+    try {
+      await startAutoSellEngine()
+      console.log("[AUTO-SELL] Engine started successfully")
+    } catch (engineError) {
+      console.error("[AUTO-SELL] Engine startup failed:", engineError)
+      autoSellState.isRunning = false
+      throw engineError
+    }
 
     return NextResponse.json({
       success: true,
-      message: `Auto-sell engine started with ${wallets.length} wallets (Vercel optimized)`,
+      message: `Auto-sell engine started with ${wallets.length} wallets`,
       config: autoSellState.config,
       wallets: autoSellState.wallets.map((wallet) => ({
         name: wallet.name,
@@ -169,83 +186,79 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error("Error starting auto-sell:", error)
-    return NextResponse.json({ error: "Failed to start auto-sell engine" }, { status: 500 })
+    console.error("Error stack:", error.stack)
+    autoSellState.isRunning = false
+    return NextResponse.json({ error: `Failed to start auto-sell engine: ${error.message}` }, { status: 500 })
   }
 }
 
 async function startAutoSellEngine() {
-  ResourceManager.cleanup()
-  autoSellState.intervals.forEach((interval) => clearInterval(interval))
-  autoSellState.intervals = []
+  try {
+    ResourceManager.cleanup()
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
 
-  autoSellState.botStartTime = Date.now()
-  const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
-  autoSellState.firstAnalysisTime = autoSellState.botStartTime + timeWindowMs
+    autoSellState.botStartTime = Date.now()
+    const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
+    autoSellState.firstAnalysisTime = autoSellState.botStartTime + timeWindowMs
 
-  console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
-  console.log(`[AUTO-SELL] First analysis will begin at ${new Date(autoSellState.firstAnalysisTime).toISOString()}`)
-  console.log(
-    `[AUTO-SELL] Waiting ${autoSellState.config.timeWindowSeconds} seconds before starting market analysis...`,
-  )
-
-  await startConfigurableAnalysisCycle()
-
-  const balanceInterval = setInterval(async () => {
-    if (!autoSellState.isRunning) return
-    autoSellState.lastActivity = Date.now()
+    console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
+    console.log(`[AUTO-SELL] First analysis will begin at ${new Date(autoSellState.firstAnalysisTime).toISOString()}`)
+    console.log(
+      `[AUTO-SELL] Waiting ${autoSellState.config.timeWindowSeconds} seconds before starting market analysis...`,
+    )
 
     try {
-      await updateAllWalletBalances()
-      console.log("[AUTO-SELL] Wallet balances updated")
-      monitorMemoryUsage()
-    } catch (error) {
-      console.error("Balance update error:", error)
+      await startConfigurableAnalysisCycle()
+      console.log("[AUTO-SELL] Analysis cycle started successfully")
+    } catch (analysisError) {
+      console.error("[AUTO-SELL] Analysis cycle startup failed:", analysisError)
+      throw analysisError
     }
-  }, 45000) // Increased to 45 seconds for Vercel
 
-  autoSellState.intervals.push(balanceInterval)
-  ResourceManager.addTimer(balanceInterval)
+    const balanceInterval = setInterval(async () => {
+      if (!autoSellState.isRunning) return
+      autoSellState.lastActivity = Date.now()
+
+      try {
+        await updateAllWalletBalances()
+        console.log("[AUTO-SELL] Wallet balances updated")
+        monitorMemoryUsage()
+      } catch (error) {
+        console.error("Balance update error:", error)
+      }
+    }, 45000)
+
+    autoSellState.intervals.push(balanceInterval)
+    ResourceManager.addTimer(balanceInterval)
+    console.log("[AUTO-SELL] Balance monitoring interval started")
+  } catch (error) {
+    console.error("[AUTO-SELL] Engine startup failed:", error)
+    autoSellState.isRunning = false
+    throw error
+  }
 }
 
 function monitorMemoryUsage() {
   try {
-    // Check if process.memoryUsage is available (Node.js runtime)
     if (typeof process !== "undefined" && typeof process.memoryUsage === "function") {
-      const usage = process.memoryUsage()
-      const now = Date.now()
+      const memUsage = process.memoryUsage()
+      autoSellState.memoryUsage.lastCheck = Date.now()
+      autoSellState.memoryUsage.peakRSS = Math.max(autoSellState.memoryUsage.peakRSS, memUsage.rss)
 
-      if (usage.rss > autoSellState.memoryUsage.peakRSS) {
-        autoSellState.memoryUsage.peakRSS = usage.rss
-      }
-
-      if (now - autoSellState.memoryUsage.lastCheck > 180000) {
-        autoSellState.memoryUsage.lastCheck = now
-        const memoryMB = Math.round(usage.rss / 1024 / 1024)
-        console.log(
-          `[MEMORY] Current: ${memoryMB}MB, Peak: ${Math.round(autoSellState.memoryUsage.peakRSS / 1024 / 1024)}MB`,
-        )
-
-        if (memoryMB > 800) {
-          autoSellState.memoryUsage.warnings++
-          console.warn(`[MEMORY] High memory usage detected: ${memoryMB}MB`)
-
-          if (global.gc) {
-            global.gc()
-            console.log("[MEMORY] Forced garbage collection")
-          }
+      if (memUsage.rss > 1024 * 1024 * 1024) {
+        // 1GB
+        console.warn(`[MEMORY] High memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB`)
+        if (global.gc) {
+          global.gc()
+          console.log("[MEMORY] Garbage collection triggered")
         }
       }
     } else {
-      // Serverless environment - use simplified monitoring
-      const now = Date.now()
-      if (now - autoSellState.memoryUsage.lastCheck > 300000) {
-        // Check every 5 minutes
-        autoSellState.memoryUsage.lastCheck = now
-        console.log("[MEMORY] Running in serverless environment - memory monitoring limited")
-      }
+      console.log("[MEMORY] Memory monitoring not available in this environment")
     }
   } catch (error) {
-    console.warn("[MEMORY] Memory monitoring unavailable in this environment:", error.message)
+    console.warn("[MEMORY] Memory monitoring error:", error)
   }
 }
 
@@ -576,6 +589,11 @@ async function analyzeAndExecuteAutoSell() {
         const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
         console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
 
+        if (totalTokens <= 0) {
+          console.log(`[AUTO-SELL] ❌ No tokens available to sell across all wallets`)
+          return
+        }
+
         console.log(`[AUTO-SELL] Step 3: Executing coordinated sell across all wallets...`)
         await executeCoordinatedSell(netUsdFlow)
         console.log(`[AUTO-SELL] Step 3 Complete: ✅ AUTOMATIC SELL EXECUTION FINISHED`)
@@ -583,6 +601,7 @@ async function analyzeAndExecuteAutoSell() {
         console.log(`[AUTO-SELL] 🎉 SUCCESS! Automatic sell completed at ${new Date().toISOString()}`)
       } catch (sellError) {
         console.error(`[AUTO-SELL] ❌ AUTOMATIC SELL FAILED:`, sellError)
+        console.error(`[AUTO-SELL] Sell error stack:`, sellError.stack)
         // Reset the trigger time so it can try again on next cycle
         autoSellState.metrics.lastSellTrigger = 0
         throw sellError
