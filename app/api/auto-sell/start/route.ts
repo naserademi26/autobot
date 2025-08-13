@@ -327,9 +327,9 @@ async function testConnectivity() {
 async function monitorMarketActivity() {
   try {
     const solPriceController = new AbortController()
-    const solPriceTimeout = setTimeout(() => solPriceController.abort(), 8000) // Increased timeout
+    const solPriceTimeout = setTimeout(() => solPriceController.abort(), 8000)
 
-    let solPriceUsd = autoSellState.metrics.solPriceUsd // Use previous value as fallback
+    let solPriceUsd = autoSellState.metrics.solPriceUsd
 
     try {
       const solPriceResponse = await fetch(
@@ -356,27 +356,27 @@ async function monitorMarketActivity() {
     autoSellState.metrics.solPriceUsd = solPriceUsd
 
     const dexController = new AbortController()
-    const dexTimeout = setTimeout(() => dexController.abort(), 12000) // Increased timeout
+    const dexTimeout = setTimeout(() => dexController.abort(), 12000)
 
     try {
-      const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
+      // Get token pair data for current price
+      const pairResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
         signal: dexController.signal,
         headers: { "User-Agent": "AutoSellBot/1.0" },
       })
-      clearTimeout(dexTimeout)
 
-      if (!response.ok) {
-        throw new Error(`DexScreener API returned ${response.status}`)
+      if (!pairResponse.ok) {
+        throw new Error(`DexScreener pair API returned ${pairResponse.status}`)
       }
 
-      const data = await response.json()
+      const pairData = await pairResponse.json()
 
-      if (!data.pairs || !Array.isArray(data.pairs) || data.pairs.length === 0) {
+      if (!pairData.pairs || !Array.isArray(pairData.pairs) || pairData.pairs.length === 0) {
         console.log("[MARKET MONITOR] No trading pairs found")
         return
       }
 
-      const validPairs = data.pairs.filter(
+      const validPairs = pairData.pairs.filter(
         (pair: any) =>
           pair && typeof pair.priceUsd === "string" && !isNaN(Number(pair.priceUsd)) && Number(pair.priceUsd) > 0,
       )
@@ -401,27 +401,86 @@ async function monitorMarketActivity() {
         return
       }
 
-      const volume24h = Math.max(0, Number(pair.volume?.h24 || 0))
-      const priceChange24h = Number(pair.priceChange?.h24 || 0)
+      const searchResponse = await fetch(
+        `https://api.dexscreener.com/latest/dex/search/?q=${autoSellState.config.mint}`,
+        {
+          signal: dexController.signal,
+          headers: { "User-Agent": "AutoSellBot/1.0" },
+        },
+      )
 
-      const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
+      let realBuyVolumeUsd = 0
+      let realSellVolumeUsd = 0
+
+      if (searchResponse.ok) {
+        const searchData = await searchResponse.json()
+        const searchPair = searchData.pairs?.find(
+          (p: any) =>
+            p.baseToken?.address === autoSellState.config.mint || p.quoteToken?.address === autoSellState.config.mint,
+        )
+
+        if (searchPair) {
+          // Use real volume data from the last few minutes
+          const volume5m = Number(searchPair.volume?.m5 || 0)
+          const volume1h = Number(searchPair.volume?.h1 || 0)
+          const priceChange5m = Number(searchPair.priceChange?.m5 || 0)
+
+          // Calculate buy/sell ratio based on recent price movement
+          const buyRatio =
+            priceChange5m > 0 ? Math.min(0.8, 0.5 + priceChange5m / 100) : Math.max(0.2, 0.5 + priceChange5m / 100)
+
+          // Use 5-minute volume scaled to our time window
+          const windowMinutes = autoSellState.config.timeWindowSeconds / 60
+          const scaledVolume = (volume5m / 5) * windowMinutes
+
+          realBuyVolumeUsd = scaledVolume * buyRatio
+          realSellVolumeUsd = scaledVolume * (1 - buyRatio)
+
+          console.log(
+            `[REAL TRADES] 5m Volume: $${volume5m.toFixed(2)} | Price Change: ${priceChange5m.toFixed(2)}% | Buy Ratio: ${(buyRatio * 100).toFixed(1)}%`,
+          )
+        }
+      }
+
+      if (realBuyVolumeUsd === 0 && realSellVolumeUsd === 0) {
+        const txns24h = Number(pair.txns?.h24?.buys || 0) + Number(pair.txns?.h24?.sells || 0)
+        const volume24h = Number(pair.volume?.h24 || 0)
+
+        if (txns24h > 0 && volume24h > 0) {
+          // Estimate recent activity based on transaction frequency
+          const avgTxnValue = volume24h / txns24h
+          const recentTxns = Math.max(1, txns24h / ((24 * 60) / autoSellState.config.timeWindowSeconds))
+          const estimatedVolume = avgTxnValue * recentTxns
+
+          const priceChange1h = Number(pair.priceChange?.h1 || 0)
+          const buyRatio =
+            priceChange1h > 0 ? Math.min(0.75, 0.5 + priceChange1h / 200) : Math.max(0.25, 0.5 + priceChange1h / 200)
+
+          realBuyVolumeUsd = estimatedVolume * buyRatio
+          realSellVolumeUsd = estimatedVolume * (1 - buyRatio)
+
+          console.log(
+            `[ESTIMATED TRADES] Recent Txns: ${recentTxns.toFixed(1)} | Avg Value: $${avgTxnValue.toFixed(2)} | Buy Ratio: ${(buyRatio * 100).toFixed(1)}%`,
+          )
+        }
+      }
+
+      clearTimeout(dexTimeout)
+
       const currentTime = Date.now()
+      const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
 
+      // Clean old trades
       autoSellState.marketTrades = autoSellState.marketTrades
         .filter((trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs)
-        .slice(-100) // Keep only last 100 trades max
+        .slice(-50) // Keep last 50 trades max
 
-      const volumeInWindow = Math.max(0, (volume24h / 24 / 60) * (autoSellState.config.timeWindowSeconds / 60))
-      const buyRatio = Math.max(0.1, Math.min(0.9, priceChange24h > 0 ? 0.6 : 0.4))
-
-      const estimatedBuyVolumeUsd = volumeInWindow * buyRatio
-      const estimatedSellVolumeUsd = volumeInWindow * (1 - buyRatio)
-
-      if (isFinite(estimatedBuyVolumeUsd) && isFinite(estimatedSellVolumeUsd)) {
+      // Add new trade data if we have meaningful volume
+      if (realBuyVolumeUsd > 0.01 || realSellVolumeUsd > 0.01) {
         const tradeData = {
           timestamp: currentTime,
-          buyVolumeUsd: estimatedBuyVolumeUsd,
-          sellVolumeUsd: estimatedSellVolumeUsd,
+          buyVolumeUsd: realBuyVolumeUsd,
+          sellVolumeUsd: realSellVolumeUsd,
           priceUsd: currentPriceUsd,
         }
 
@@ -442,7 +501,7 @@ async function monitorMarketActivity() {
       }
 
       console.log(
-        `[MARKET MONITOR] Price: $${currentPriceUsd.toFixed(6)} | Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)}`,
+        `[MARKET MONITOR] Price: $${currentPriceUsd.toFixed(6)} | Window Buy: $${buyVolumeUsd.toFixed(2)} | Window Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)} | Trades: ${autoSellState.marketTrades.length}`,
       )
     } catch (dexError: any) {
       clearTimeout(dexTimeout)
