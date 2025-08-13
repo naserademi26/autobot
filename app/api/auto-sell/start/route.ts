@@ -792,3 +792,33 @@ async function updateSolPrice() {
     console.error("Failed to update SOL price:", error)
   }
 }
+
+process.on("SIGTERM", () => {
+  console.log("[AUTO-SELL] Received SIGTERM, shutting down gracefully...")
+  if (autoSellState.isRunning) {
+    autoSellState.isRunning = false
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
+  }
+  process.exit(0)
+})
+
+process.on("SIGINT", () => {
+  console.log("[AUTO-SELL] Received SIGINT, shutting down gracefully...")
+  if (autoSellState.isRunning) {
+    autoSellState.isRunning = false
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
+  }
+  process.exit(0)
+})
+
+process.on("uncaughtException", (error) => {
+  console.error("[AUTO-SELL] Uncaught Exception:", error)
+  // Don't exit, just log the error
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[AUTO-SELL] Unhandled Rejection at:", promise, "reason:", reason)
+  // Don't exit, just log the error
+})

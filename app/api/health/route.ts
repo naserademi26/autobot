@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { Connection } from "@solana/web3.js"
+import { AbortSignal } from "abort-controller"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -17,9 +18,29 @@ const JUP_BASE = process.env.JUP_BASE || "https://api.jup.ag"
 const JUP_API_KEY = process.env.JUP_API_KEY || process.env.JUPITER_API_KEY || "e2f280df-aa16-4c78-979c-6468f660dbfb"
 
 export async function GET() {
-  const out: any = {}
+  const out: any = {
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    autoSell: {
+      running: false,
+      wallets: 0,
+      lastActivity: null,
+    },
+  }
 
-  // RPC test
+  try {
+    const { autoSellState } = await import("../auto-sell/start/route")
+    out.autoSell = {
+      running: autoSellState.isRunning,
+      wallets: autoSellState.wallets?.length || 0,
+      lastActivity: autoSellState.metrics?.lastSellTrigger || null,
+    }
+  } catch (e) {
+    // Auto-sell module not loaded yet
+  }
+
   try {
     const conn = new Connection(HELIUS_RPC_URL, { commitment: "confirmed" })
     const bh = await conn.getLatestBlockhash("confirmed")
@@ -28,19 +49,26 @@ export async function GET() {
     out.rpc = { ok: false, error: e?.message || String(e) }
   }
 
-  // Jupiter quote test (SOL->SOL minimal amount just to check reachability)
   try {
     const url = `${JUP_BASE}/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=So11111111111111111111111111111111111111112&amount=1000&slippageBps=10`
-    const res = await fetch(url, { headers: { "X-API-Key": JUP_API_KEY, Accept: "application/json" } })
+    const res = await fetch(url, {
+      headers: { "X-API-Key": JUP_API_KEY, Accept: "application/json" },
+      signal: AbortSignal.timeout(5000),
+    })
     out.jupiter = { ok: res.ok, status: res.status }
   } catch (e: any) {
     out.jupiter = { ok: false, error: e?.message || String(e) }
   }
 
-  // bloXroute reachability (GET home should return non-network error or 200/4xx)
   try {
-    const resRegion = await fetch(BXR_REGION, { method: "GET" })
-    const resSubmit = await fetch(BXR_SUBMIT, { method: "GET" })
+    const resRegion = await fetch(BXR_REGION, {
+      method: "GET",
+      signal: AbortSignal.timeout(5000),
+    })
+    const resSubmit = await fetch(BXR_SUBMIT, {
+      method: "GET",
+      signal: AbortSignal.timeout(5000),
+    })
     out.bloxroute = {
       regionReachable: true,
       regionStatus: resRegion.status,
