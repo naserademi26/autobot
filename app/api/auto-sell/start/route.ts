@@ -405,191 +405,44 @@ async function collectMarketDataForConfigurableWindow() {
 
 async function analyzeAndExecuteAutoSell() {
   try {
-    const { netUsdFlow, buyVolumeUsd } = autoSellState.metrics
+    const { buyVolumeUsd, sellVolumeUsd } = autoSellState.metrics
 
-    console.log(`[AUTO-SELL] Analysis: Net Flow $${netUsdFlow.toFixed(2)}, Buy Volume $${buyVolumeUsd.toFixed(2)}`)
+    // Calculate net flow exactly as requested: Buy Volume USD - Sell Volume USD = Net Flow
+    const calculatedNetFlow = buyVolumeUsd - sellVolumeUsd
+    autoSellState.metrics.netUsdFlow = calculatedNetFlow
 
-    if (netUsdFlow > 0 && buyVolumeUsd > 0) {
-      const sellAmountUsd = (netUsdFlow * autoSellState.config.sellPercentageOfNetFlow) / 100
+    console.log(
+      `[AUTO-SELL] Analysis: Buy $${buyVolumeUsd.toFixed(2)} - Sell $${sellVolumeUsd.toFixed(2)} = Net Flow $${calculatedNetFlow.toFixed(2)}`,
+    )
+
+    // Trigger condition: When Net Flow > 0 (no threshold, just positive flow)
+    if (calculatedNetFlow > 0) {
+      const sellPercentage = autoSellState.config.sellPercentageOfNetFlow || 25
+      const sellAmountUsd = (calculatedNetFlow * sellPercentage) / 100
 
       console.log(
-        `[AUTO-SELL] 🚀 SELL TRIGGER ACTIVE: Net flow $${netUsdFlow.toFixed(2)} > $0, will sell $${sellAmountUsd.toFixed(2)} worth`,
+        `[AUTO-SELL] 🚀 SELL TRIGGER ACTIVE: Net flow $${calculatedNetFlow.toFixed(2)} > $0, will sell ${sellPercentage}% = $${sellAmountUsd.toFixed(2)} worth`,
       )
 
+      // Force immediate execution
       try {
         await executeCoordinatedSell(sellAmountUsd)
         console.log(`[AUTO-SELL] ✅ Coordinated sell executed successfully`)
+
+        // Update last sell time immediately
+        autoSellState.metrics.lastSellTime = Date.now()
+
+        // Force wallet balance update after sell
+        setTimeout(() => updateAllWalletBalances(), 1000)
       } catch (sellError) {
         console.error("[AUTO-SELL] ❌ Sell execution failed:", sellError)
+        console.error("[AUTO-SELL] Error details:", sellError.stack)
       }
     } else {
-      console.log(
-        `[AUTO-SELL] No sell trigger: Net flow $${netUsdFlow.toFixed(2)}, Buy volume $${buyVolumeUsd.toFixed(2)}`,
-      )
+      console.log(`[AUTO-SELL] No sell trigger: Net flow $${calculatedNetFlow.toFixed(2)} <= $0 (need positive flow)`)
     }
   } catch (error) {
     console.error("[AUTO-SELL] Analysis error:", error)
-  }
-}
-
-async function executeCoordinatedSell(netUsdFlow: number) {
-  try {
-    console.log(`[AUTO-SELL] 🚀 STARTING COORDINATED SELL EXECUTION`)
-    console.log(`[AUTO-SELL] Net USD Flow: $${netUsdFlow.toFixed(2)}`)
-
-    // Force price update with multiple fallbacks
-    console.log(`[AUTO-SELL] Step 1: Forcing price update...`)
-    let currentPriceUsd = autoSellState.metrics.currentPriceUsd
-
-    if (currentPriceUsd <= 0) {
-      console.log(`[AUTO-SELL] Current price is $0, forcing fresh price fetch...`)
-      await updateTokenPrice()
-      currentPriceUsd = autoSellState.metrics.currentPriceUsd
-
-      if (currentPriceUsd <= 0) {
-        console.log(`[AUTO-SELL] Price still $0, using conservative fallback price...`)
-        currentPriceUsd = 0.000001 // Conservative fallback
-        autoSellState.metrics.currentPriceUsd = currentPriceUsd
-      }
-    }
-
-    console.log(`[AUTO-SELL] Using price: $${currentPriceUsd}`)
-
-    // Force wallet balance update
-    console.log(`[AUTO-SELL] Step 2: Forcing wallet balance update...`)
-    await updateAllWalletBalances()
-
-    const walletsWithTokens = autoSellState.wallets.filter((wallet) => {
-      const hasTokens = wallet.tokenBalance > 0
-      console.log(
-        `[BALANCE] ${wallet.name}: ${wallet.balance.toFixed(4)} SOL, ${wallet.tokenBalance.toFixed(2)} tokens - ${hasTokens ? "✅ WILL SELL" : "❌ SKIP"}`,
-      )
-      return hasTokens
-    })
-
-    if (walletsWithTokens.length === 0) {
-      console.log("[AUTO-SELL] ❌ NO WALLETS HAVE TOKENS TO SELL!")
-      autoSellState.wallets.forEach((wallet) => {
-        console.log(
-          `[AUTO-SELL]   ${wallet.name}: SOL=${wallet.balance.toFixed(4)}, Tokens=${wallet.tokenBalance.toFixed(4)}`,
-        )
-      })
-      return
-    }
-
-    const totalTokensHeld = walletsWithTokens.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
-    const sellPercentage = autoSellState.config.sellPercentageOfNetFlow || 25
-    const targetSellUsd = (netUsdFlow * sellPercentage) / 100
-    const totalTokensToSell = targetSellUsd / currentPriceUsd
-
-    console.log(`[AUTO-SELL] 🎯 SELL CALCULATION:`)
-    console.log(`[AUTO-SELL]   - Total tokens held: ${totalTokensHeld.toFixed(4)}`)
-    console.log(
-      `[AUTO-SELL]   - Target sell USD: $${targetSellUsd.toFixed(2)} (${sellPercentage}% of $${netUsdFlow.toFixed(2)})`,
-    )
-    console.log(`[AUTO-SELL]   - Total tokens to sell: ${totalTokensToSell.toFixed(4)}`)
-    console.log(`[AUTO-SELL]   - Price per token: $${currentPriceUsd}`)
-
-    if (totalTokensToSell > totalTokensHeld) {
-      console.log(
-        `[AUTO-SELL] ⚠️ Adjusting sell amount: Want ${totalTokensToSell.toFixed(4)} but only have ${totalTokensHeld.toFixed(4)}`,
-      )
-    }
-
-    // Execute sells with enhanced error handling
-    const sellPromises = walletsWithTokens.map(async (wallet, index) => {
-      try {
-        const walletTokenRatio = wallet.tokenBalance / totalTokensHeld
-        const walletSellAmount = Math.min(totalTokensToSell * walletTokenRatio, wallet.tokenBalance)
-
-        if (walletSellAmount < 0.0001) {
-          console.log(`[AUTO-SELL] ${wallet.name}: Sell amount too small (${walletSellAmount.toFixed(6)}), skipping`)
-          return null
-        }
-
-        console.log(
-          `[AUTO-SELL] ${wallet.name}: Selling ${walletSellAmount.toFixed(4)} tokens (${(walletTokenRatio * 100).toFixed(1)}% of total)`,
-        )
-
-        const signature = await executeSell(wallet, walletSellAmount)
-        const sellUsdValue = walletSellAmount * currentPriceUsd
-
-        console.log(`[AUTO-SELL] ${wallet.name}: ✅ SELL SUCCESS! Signature: ${signature}`)
-
-        // Update metrics immediately
-        autoSellState.metrics.totalSold += sellUsdValue
-        autoSellState.metrics.sellVolumeUsd += sellUsdValue
-        autoSellState.metrics.lastSellTime = Date.now()
-
-        // Add to transaction history
-        autoSellState.transactionHistory.unshift({
-          timestamp: Date.now(),
-          type: "sell",
-          wallet: wallet.name,
-          tokenAmount: walletSellAmount,
-          usdValue: sellUsdValue,
-          price: currentPriceUsd,
-          signature: signature,
-        })
-
-        // Keep only last 50 transactions
-        if (autoSellState.transactionHistory.length > 50) {
-          autoSellState.transactionHistory = autoSellState.transactionHistory.slice(0, 50)
-        }
-
-        return {
-          wallet: wallet.name,
-          tokenAmount: walletSellAmount,
-          usdValue: sellUsdValue,
-          signature: signature,
-        }
-      } catch (error) {
-        console.error(`[AUTO-SELL] ${wallet.name}: ❌ SELL FAILED:`, error)
-        return {
-          wallet: wallet.name,
-          error: error.message,
-        }
-      }
-    })
-
-    console.log(`[AUTO-SELL] 🔄 Executing ${sellPromises.length} sell transactions...`)
-    const results = await Promise.all(sellPromises)
-
-    const successful = results.filter((r) => r && !r.error)
-    const failed = results.filter((r) => r && r.error)
-
-    console.log(`[AUTO-SELL] 📊 EXECUTION RESULTS:`)
-    console.log(`[AUTO-SELL]   - Successful: ${successful.length}`)
-    console.log(`[AUTO-SELL]   - Failed: ${failed.length}`)
-
-    if (successful.length > 0) {
-      const totalSoldUsd = successful.reduce((sum, r) => sum + (r.usdValue || 0), 0)
-      const totalSoldTokens = successful.reduce((sum, r) => sum + (r.tokenAmount || 0), 0)
-
-      console.log(`[AUTO-SELL] 🎉 TOTAL SOLD: ${totalSoldTokens.toFixed(4)} tokens = $${totalSoldUsd.toFixed(2)}`)
-
-      successful.forEach((result) => {
-        console.log(
-          `[AUTO-SELL]   ✅ ${result.wallet}: ${result.tokenAmount.toFixed(4)} tokens = $${result.usdValue.toFixed(2)} (${result.signature})`,
-        )
-      })
-
-      // Update wallet balances after successful sells
-      await updateAllWalletBalances()
-    }
-
-    if (failed.length > 0) {
-      console.log(`[AUTO-SELL] ❌ FAILED SELLS:`)
-      failed.forEach((result) => {
-        console.log(`[AUTO-SELL]   ❌ ${result.wallet}: ${result.error}`)
-      })
-    }
-
-    console.log(`[AUTO-SELL] ✅ COORDINATED SELL EXECUTION COMPLETED`)
-  } catch (error) {
-    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in coordinated sell:", error)
-    console.error("[AUTO-SELL] Error stack:", error.stack)
-    throw error
   }
 }
 
@@ -759,7 +612,7 @@ async function updateWalletBalances(wallet: any) {
         const tokenAccount = await connection.getTokenAccountBalance(ata)
         wallet.tokenBalance = tokenAccount.value?.uiAmount || 0
         console.log(
-          `[BALANCE] ${wallet.name}: ${wallet.balance.toFixed(4)} SOL, ${wallet.tokenBalance.toFixed(2)} tokens`,
+          `[BALANCE] ${wallet.name}: ${wallet.balance.toFixed(4)} SOL, ${wallet.tokenBalance.toFixed(6)} tokens`,
         )
       } else {
         wallet.tokenBalance = 0
@@ -1016,6 +869,162 @@ async function collectDexScreenerFallbackData() {
     }
   } catch (error) {
     console.error("[DEXSCREENER] Fallback failed:", error.message)
+    throw error
+  }
+}
+
+async function executeCoordinatedSell(sellAmountUsd: number) {
+  try {
+    console.log(`[AUTO-SELL] 🚀 STARTING COORDINATED SELL EXECUTION`)
+    console.log(`[AUTO-SELL] Target sell amount: $${sellAmountUsd.toFixed(2)}`)
+
+    // Force price update with multiple fallbacks
+    console.log(`[AUTO-SELL] Step 1: Updating token price...`)
+    await updateTokenPrice()
+    let currentPriceUsd = autoSellState.metrics.currentPriceUsd
+
+    if (currentPriceUsd <= 0) {
+      console.log(`[AUTO-SELL] Price is $0, using DexScreener fallback...`)
+      try {
+        const axios = await import("axios")
+        const response = await axios.default.get(
+          `https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`,
+          { timeout: 5000 },
+        )
+        if (response.data?.pairs?.[0]?.priceUsd) {
+          currentPriceUsd = Number.parseFloat(response.data.pairs[0].priceUsd)
+          autoSellState.metrics.currentPriceUsd = currentPriceUsd
+          console.log(`[AUTO-SELL] DexScreener price: $${currentPriceUsd}`)
+        }
+      } catch (priceError) {
+        console.log(`[AUTO-SELL] DexScreener failed, using conservative fallback price`)
+        currentPriceUsd = 0.000001 // Conservative fallback
+        autoSellState.metrics.currentPriceUsd = currentPriceUsd
+      }
+    }
+
+    console.log(`[AUTO-SELL] Using price: $${currentPriceUsd}`)
+
+    // Force wallet balance update
+    console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
+    await updateAllWalletBalances()
+
+    const walletsWithTokens = autoSellState.wallets.filter((wallet) => {
+      const hasTokens = wallet.tokenBalance > 0.0001 // Minimum threshold
+      console.log(
+        `[BALANCE] ${wallet.name}: ${wallet.balance.toFixed(4)} SOL, ${wallet.tokenBalance.toFixed(6)} tokens - ${hasTokens ? "✅ WILL SELL" : "❌ SKIP"}`,
+      )
+      return hasTokens
+    })
+
+    if (walletsWithTokens.length === 0) {
+      console.log("[AUTO-SELL] ❌ NO WALLETS HAVE TOKENS TO SELL!")
+      console.log("[AUTO-SELL] Wallet details:")
+      autoSellState.wallets.forEach((wallet) => {
+        console.log(
+          `[AUTO-SELL]   ${wallet.name}: SOL=${wallet.balance.toFixed(4)}, Tokens=${wallet.tokenBalance.toFixed(6)}`,
+        )
+      })
+      return
+    }
+
+    const totalTokensHeld = walletsWithTokens.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
+    const totalTokensToSell = sellAmountUsd / currentPriceUsd
+
+    console.log(`[AUTO-SELL] 🎯 SELL CALCULATION:`)
+    console.log(`[AUTO-SELL]   - Total tokens held: ${totalTokensHeld.toFixed(6)}`)
+    console.log(`[AUTO-SELL]   - Target sell USD: $${sellAmountUsd.toFixed(2)}`)
+    console.log(`[AUTO-SELL]   - Total tokens to sell: ${totalTokensToSell.toFixed(6)}`)
+    console.log(`[AUTO-SELL]   - Price per token: $${currentPriceUsd}`)
+
+    // Execute sells immediately with all wallets
+    const sellPromises = walletsWithTokens.map(async (wallet, index) => {
+      try {
+        const walletTokenRatio = wallet.tokenBalance / totalTokensHeld
+        const walletSellAmount = Math.min(totalTokensToSell * walletTokenRatio, wallet.tokenBalance * 0.95) // Sell 95% to avoid dust
+
+        if (walletSellAmount < 0.0001) {
+          console.log(`[AUTO-SELL] ${wallet.name}: Sell amount too small (${walletSellAmount.toFixed(6)}), skipping`)
+          return null
+        }
+
+        console.log(
+          `[AUTO-SELL] ${wallet.name}: Selling ${walletSellAmount.toFixed(6)} tokens (${(walletTokenRatio * 100).toFixed(1)}% of total)`,
+        )
+
+        const signature = await executeSell(wallet, walletSellAmount)
+        const sellUsdValue = walletSellAmount * currentPriceUsd
+
+        console.log(`[AUTO-SELL] ${wallet.name}: ✅ SELL SUCCESS! Signature: ${signature}`)
+
+        // Update metrics immediately
+        autoSellState.metrics.totalSold += sellUsdValue
+        autoSellState.metrics.lastSellTime = Date.now()
+
+        // Add to transaction history
+        autoSellState.transactionHistory.unshift({
+          timestamp: Date.now(),
+          type: "sell",
+          wallet: wallet.name,
+          tokenAmount: walletSellAmount,
+          usdValue: sellUsdValue,
+          price: currentPriceUsd,
+          signature: signature,
+        })
+
+        // Keep only last 50 transactions
+        if (autoSellState.transactionHistory.length > 50) {
+          autoSellState.transactionHistory = autoSellState.transactionHistory.slice(0, 50)
+        }
+
+        return {
+          wallet: wallet.name,
+          tokenAmount: walletSellAmount,
+          usdValue: sellUsdValue,
+          signature: signature,
+        }
+      } catch (error) {
+        console.error(`[AUTO-SELL] ${wallet.name}: ❌ SELL FAILED:`, error.message)
+        return {
+          wallet: wallet.name,
+          error: error.message,
+        }
+      }
+    })
+
+    console.log(`[AUTO-SELL] 🔄 Executing ${sellPromises.length} sell transactions simultaneously...`)
+    const results = await Promise.allSettled(sellPromises)
+
+    const successful = results.filter((r) => r.status === "fulfilled" && r.value && !r.value.error).map((r) => r.value)
+    const failed = results.filter((r) => r.status === "rejected" || (r.status === "fulfilled" && r.value?.error))
+
+    console.log(`[AUTO-SELL] 📊 EXECUTION RESULTS:`)
+    console.log(`[AUTO-SELL]   - Successful: ${successful.length}`)
+    console.log(`[AUTO-SELL]   - Failed: ${failed.length}`)
+
+    if (successful.length > 0) {
+      const totalSoldUsd = successful.reduce((sum, r) => sum + (r.usdValue || 0), 0)
+      const totalSoldTokens = successful.reduce((sum, r) => sum + (r.tokenAmount || 0), 0)
+
+      console.log(`[AUTO-SELL] 🎉 TOTAL SOLD: ${totalSoldTokens.toFixed(6)} tokens = $${totalSoldUsd.toFixed(2)}`)
+
+      successful.forEach((result) => {
+        console.log(
+          `[AUTO-SELL]   ✅ ${result.wallet}: ${result.tokenAmount.toFixed(6)} tokens = $${result.usdValue.toFixed(2)} (${result.signature})`,
+        )
+      })
+
+      // Update wallet balances after successful sells
+      setTimeout(() => updateAllWalletBalances(), 2000)
+    }
+
+    if (failed.length > 0) {
+      console.log(`[AUTO-SELL] ❌ FAILED SELLS: ${failed.length}`)
+    }
+
+    console.log(`[AUTO-SELL] ✅ COORDINATED SELL EXECUTION COMPLETED`)
+  } catch (error) {
+    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in coordinated sell:", error)
     throw error
   }
 }
