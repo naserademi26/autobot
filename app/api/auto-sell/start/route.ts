@@ -192,9 +192,22 @@ async function startAutoSellEngine() {
   autoSellState.intervals = []
   autoSellState.intervalIds.clear()
 
+  autoSellState.errorCount = 0
+  autoSellState.lastError = null
   autoSellState.metrics.analysisWindowStart = Date.now()
   autoSellState.metrics.windowCompleted = false
+
   console.log(`[ENGINE] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
+
+  await new Promise((resolve) => setTimeout(resolve, 2000))
+
+  try {
+    console.log("[ENGINE] Testing initial connectivity...")
+    await testConnectivity()
+    console.log("[ENGINE] Connectivity test passed")
+  } catch (connectivityError) {
+    console.warn("[ENGINE] Initial connectivity test failed, but continuing:", connectivityError)
+  }
 
   const marketMonitorInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
@@ -208,19 +221,23 @@ async function startAutoSellEngine() {
     try {
       await monitorMarketActivity()
       if (autoSellState.errorCount > 0) {
-        autoSellState.errorCount = Math.max(0, autoSellState.errorCount - 1)
+        autoSellState.errorCount = Math.max(0, autoSellState.errorCount - 2)
       }
     } catch (error: any) {
       autoSellState.errorCount++
       autoSellState.lastError = error?.message || "Market monitoring error"
       console.error("Market monitoring error:", error)
 
-      if (autoSellState.errorCount > 10) {
-        console.error("Too many errors, stopping auto-sell engine")
+      const startupPeriod = 5 * 60 * 1000 // 5 minutes
+      const isStartupPeriod = Date.now() - autoSellState.startTime < startupPeriod
+      const errorThreshold = isStartupPeriod ? 20 : 10
+
+      if (autoSellState.errorCount > errorThreshold) {
+        console.error(`Too many errors (${autoSellState.errorCount}), stopping auto-sell engine`)
         await stopAutoSellEngine()
       }
     }
-  }, 10000)
+  }, 15000) // Increased to 15 seconds to reduce load
 
   const executionInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
@@ -232,12 +249,12 @@ async function startAutoSellEngine() {
       autoSellState.lastError = error?.message || "Auto-sell execution error"
       console.error("Auto-sell execution error:", error)
 
-      if (autoSellState.errorCount > 10) {
+      if (autoSellState.errorCount > 25) {
         console.error("Too many errors, stopping auto-sell engine")
         await stopAutoSellEngine()
       }
     }
-  }, 30000) // Check every 30 seconds instead of 15
+  }, 45000) // Increased to 45 seconds
 
   const balanceInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
@@ -247,37 +264,70 @@ async function startAutoSellEngine() {
     } catch (error: any) {
       console.error("Balance update error:", error)
     }
-  }, 60000) // Reduced to every 60 seconds to save resources
+  }, 90000) // Increased to 90 seconds to reduce load
 
   autoSellState.intervals.push(marketMonitorInterval, executionInterval, balanceInterval)
   autoSellState.intervalIds.add(marketMonitorInterval)
   autoSellState.intervalIds.add(executionInterval)
   autoSellState.intervalIds.add(balanceInterval)
+
+  console.log("[ENGINE] All intervals started successfully")
 }
 
-async function stopAutoSellEngine() {
-  console.log("[ENGINE] Stopping auto-sell engine...")
-  autoSellState.isRunning = false
+async function testConnectivity() {
+  const testPromises = []
 
-  autoSellState.intervals.forEach((interval) => {
-    try {
-      clearInterval(interval)
-      autoSellState.intervalIds.delete(interval)
-    } catch (e) {
-      console.warn("Error clearing interval:", e)
-    }
-  })
-  autoSellState.intervals = []
-  autoSellState.intervalIds.clear()
+  // Test SOL price API
+  testPromises.push(
+    fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", {
+      signal: AbortSignal.timeout(5000),
+      headers: { "User-Agent": "AutoSellBot/1.0" },
+    })
+      .then((r) => (r.ok ? "SOL_PRICE_OK" : "SOL_PRICE_FAIL"))
+      .catch(() => "SOL_PRICE_FAIL"),
+  )
 
-  autoSellState.marketTrades = []
-  console.log("[ENGINE] Auto-sell engine stopped and cleaned up")
+  // Test DexScreener API
+  testPromises.push(
+    fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
+      signal: AbortSignal.timeout(8000),
+      headers: { "User-Agent": "AutoSellBot/1.0" },
+    })
+      .then((r) => (r.ok ? "DEXSCREENER_OK" : "DEXSCREENER_FAIL"))
+      .catch(() => "DEXSCREENER_FAIL"),
+  )
+
+  // Test RPC connection
+  testPromises.push(
+    (async () => {
+      try {
+        const { Connection } = await import("@solana/web3.js")
+        const connection = new Connection(
+          process.env.NEXT_PUBLIC_RPC_URL ||
+            process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+            "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+          { commitment: "confirmed" },
+        )
+        await connection.getLatestBlockhash()
+        return "RPC_OK"
+      } catch {
+        return "RPC_FAIL"
+      }
+    })(),
+  )
+
+  const results = await Promise.allSettled(testPromises)
+  const testResults = results.map((r) => (r.status === "fulfilled" ? r.value : "FAILED"))
+
+  console.log("[CONNECTIVITY]", testResults.join(", "))
+
+  return testResults
 }
 
 async function monitorMarketActivity() {
   try {
     const solPriceController = new AbortController()
-    const solPriceTimeout = setTimeout(() => solPriceController.abort(), 5000)
+    const solPriceTimeout = setTimeout(() => solPriceController.abort(), 8000) // Increased timeout
 
     let solPriceUsd = autoSellState.metrics.solPriceUsd // Use previous value as fallback
 
@@ -306,7 +356,7 @@ async function monitorMarketActivity() {
     autoSellState.metrics.solPriceUsd = solPriceUsd
 
     const dexController = new AbortController()
-    const dexTimeout = setTimeout(() => dexController.abort(), 8000)
+    const dexTimeout = setTimeout(() => dexController.abort(), 12000) // Increased timeout
 
     try {
       const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
@@ -326,7 +376,6 @@ async function monitorMarketActivity() {
         return
       }
 
-      // Get the most liquid pair with validation
       const validPairs = data.pairs.filter(
         (pair: any) =>
           pair && typeof pair.priceUsd === "string" && !isNaN(Number(pair.priceUsd)) && Number(pair.priceUsd) > 0,
@@ -352,11 +401,9 @@ async function monitorMarketActivity() {
         return
       }
 
-      // Get recent transactions from the pair with validation
       const volume24h = Math.max(0, Number(pair.volume?.h24 || 0))
       const priceChange24h = Number(pair.priceChange?.h24 || 0)
 
-      // Estimate recent buy/sell activity based on volume and price movement
       const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
       const currentTime = Date.now()
 
@@ -364,14 +411,12 @@ async function monitorMarketActivity() {
         .filter((trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs)
         .slice(-100) // Keep only last 100 trades max
 
-      // Estimate current market momentum based on price change and volume
       const volumeInWindow = Math.max(0, (volume24h / 24 / 60) * (autoSellState.config.timeWindowSeconds / 60))
       const buyRatio = Math.max(0.1, Math.min(0.9, priceChange24h > 0 ? 0.6 : 0.4))
 
       const estimatedBuyVolumeUsd = volumeInWindow * buyRatio
       const estimatedSellVolumeUsd = volumeInWindow * (1 - buyRatio)
 
-      // Add estimated trade data with validation
       if (isFinite(estimatedBuyVolumeUsd) && isFinite(estimatedSellVolumeUsd)) {
         const tradeData = {
           timestamp: currentTime,
@@ -383,7 +428,6 @@ async function monitorMarketActivity() {
         autoSellState.marketTrades.push(tradeData)
       }
 
-      // Calculate net USD flow in time window with validation
       const buyVolumeUsd = autoSellState.marketTrades.reduce((sum, trade) => sum + (Number(trade.buyVolumeUsd) || 0), 0)
       const sellVolumeUsd = autoSellState.marketTrades.reduce(
         (sum, trade) => sum + (Number(trade.sellVolumeUsd) || 0),
@@ -402,12 +446,35 @@ async function monitorMarketActivity() {
       )
     } catch (dexError: any) {
       clearTimeout(dexTimeout)
-      throw new Error(`DexScreener error: ${dexError?.message || "Unknown error"}`)
+      if (dexError.name === "AbortError") {
+        throw new Error("DexScreener request timeout")
+      } else {
+        throw new Error(`DexScreener error: ${dexError?.message || "Unknown error"}`)
+      }
     }
   } catch (error: any) {
     console.error("Market monitoring error:", error)
     throw error
   }
+}
+
+async function stopAutoSellEngine() {
+  console.log("[ENGINE] Stopping auto-sell engine...")
+  autoSellState.isRunning = false
+
+  autoSellState.intervals.forEach((interval) => {
+    try {
+      clearInterval(interval)
+      autoSellState.intervalIds.delete(interval)
+    } catch (e) {
+      console.warn("Error clearing interval:", e)
+    }
+  })
+  autoSellState.intervals = []
+  autoSellState.intervalIds.clear()
+
+  autoSellState.marketTrades = []
+  console.log("[ENGINE] Auto-sell engine stopped and cleaned up")
 }
 
 async function checkAndExecuteAutoSell() {
@@ -416,14 +483,12 @@ async function checkAndExecuteAutoSell() {
     const windowDurationMs = autoSellState.config.timeWindowSeconds * 1000
     const timeSinceWindowStart = currentTime - autoSellState.metrics.analysisWindowStart
 
-    // Check if analysis window is complete
     if (timeSinceWindowStart < windowDurationMs) {
       const remainingSeconds = Math.ceil((windowDurationMs - timeSinceWindowStart) / 1000)
       console.log(`[WINDOW] Analysis window in progress... ${remainingSeconds}s remaining`)
       return
     }
 
-    // Window is complete, check if we should sell
     if (!autoSellState.metrics.windowCompleted) {
       autoSellState.metrics.windowCompleted = true
       console.log(`[WINDOW] Analysis window completed! Analyzing ${autoSellState.config.timeWindowSeconds}s of data...`)
@@ -447,7 +512,7 @@ async function checkAndExecuteAutoSell() {
       console.log(`[WINDOW] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
       autoSellState.metrics.analysisWindowStart = currentTime
       autoSellState.metrics.windowCompleted = false
-      autoSellState.marketTrades = [] // Clear old trades for new window
+      autoSellState.marketTrades = []
       autoSellState.metrics.buyVolumeUsd = 0
       autoSellState.metrics.sellVolumeUsd = 0
       autoSellState.metrics.netUsdFlow = 0
@@ -475,7 +540,6 @@ async function executeAutoSell() {
       return
     }
 
-    // Convert USD amount to equivalent token amount based on current price
     const exactTokensToSell = exactUsdAmountToSell / currentPriceUsd
 
     console.log(
@@ -510,11 +574,9 @@ async function executeAutoSell() {
 
     for (let i = 0; i < maxConcurrentSells; i++) {
       const wallet = walletsWithTokens[i]
-      // Calculate proportional amount for this wallet
       const walletProportion = wallet.tokenBalance / totalTokensHeld
       const walletTokensToSell = exactTokensToSell * walletProportion
 
-      // Only sell if amount is meaningful (> 0.000001 tokens)
       if (walletTokensToSell > 0.000001) {
         totalTokensToSell += walletTokensToSell
 
@@ -523,7 +585,6 @@ async function executeAutoSell() {
             const actualUsdSold = walletTokensToSell * currentPriceUsd
             const actualSolReceived = walletTokensToSell * autoSellState.metrics.currentPrice
 
-            // Set cooldown for this wallet
             wallet.cooldownUntil = Date.now() + autoSellState.config.timeWindowSeconds * 1000
 
             console.log(
@@ -558,7 +619,6 @@ async function executeAutoSell() {
     console.log(`[AUTO-SELL] Executing sells across ${sellPromises.length} wallets simultaneously...`)
     const results = await Promise.all(sellPromises)
 
-    // Calculate totals and update metrics
     let totalUsdSold = 0
     let totalTokensSold = 0
     let successfulSells = 0
@@ -586,7 +646,6 @@ async function executeAutoSell() {
 }
 
 async function updateAllWalletBalances() {
-  // Process wallets in batches to prevent overwhelming RPC
   const batchSize = 3
   const walletBatches = []
 
@@ -604,7 +663,6 @@ async function updateAllWalletBalances() {
 
     await Promise.allSettled(balancePromises)
 
-    // Small delay between batches to prevent rate limiting
     if (walletBatches.length > 1) {
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
@@ -631,18 +689,15 @@ async function updateWalletBalances(wallet: any) {
     const balanceTimeout = setTimeout(() => balanceController.abort(), 10000)
 
     try {
-      // Get SOL balance
       const solBalance = await connection.getBalance(wallet.keypair.publicKey)
       wallet.balance = solBalance / 1e9
 
-      // Get token balance
       try {
         const mintPubkey = new PublicKey(autoSellState.config.mint)
         const ata = await getAssociatedTokenAddress(mintPubkey, wallet.keypair.publicKey)
         const tokenAccount = await connection.getTokenAccountBalance(ata)
         wallet.tokenBalance = tokenAccount.value?.uiAmount || 0
       } catch (tokenError) {
-        // Token account might not exist, set to 0
         wallet.tokenBalance = 0
       }
 
@@ -678,14 +733,12 @@ async function executeSell(wallet: any, amount: number) {
     const mintInfo = await getMint(connection, new PublicKey(autoSellState.config.mint))
     const decimals = mintInfo.decimals
 
-    // Convert to atoms with validation
     const amountInAtoms = BigInt(Math.floor(amount * 10 ** decimals)).toString()
 
     if (!amountInAtoms || amountInAtoms === "0") {
       throw new Error("Invalid amount calculation")
     }
 
-    // Get Jupiter quote with timeout
     const jupiterBase = process.env.JUPITER_BASE || "https://quote-api.jup.ag"
     const outputMint = "So11111111111111111111111111111111111111112" // SOL
 
@@ -704,7 +757,6 @@ async function executeSell(wallet: any, amount: number) {
       throw new Error("No quote received from Jupiter")
     }
 
-    // Get swap transaction with timeout
     const swapResponse = await axios.default.post(
       `${jupiterBase}/v6/swap`,
       {
@@ -721,7 +773,6 @@ async function executeSell(wallet: any, amount: number) {
       throw new Error("No swap transaction received from Jupiter")
     }
 
-    // Sign and submit transaction
     const tx = VersionedTransaction.deserialize(Buffer.from(swapResponse.data.swapTransaction, "base64"))
     tx.sign([wallet.keypair])
 
@@ -746,7 +797,7 @@ async function executeSell(wallet: any, amount: number) {
               "Content-Type": "application/json",
               "User-Agent": "AutoSellBot/1.0",
             },
-            timeout: 10000, // 10 second timeout
+            timeout: 10000,
           },
         )
 
@@ -767,7 +818,6 @@ async function executeSell(wallet: any, amount: number) {
       }
     }
 
-    // Fallback to RPC with better error handling
     try {
       const signature = await connection.sendTransaction(tx, {
         skipPreflight: true,
@@ -790,5 +840,4 @@ async function executeSell(wallet: any, amount: number) {
   }
 }
 
-// Export the state for status endpoint
 export { autoSellState }
