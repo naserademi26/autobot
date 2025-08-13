@@ -1,15 +1,14 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { Buffer } from "buffer"
 
-// Global state for the auto-sell engine
 const autoSellState = {
   isRunning: false,
   config: null as any,
   wallets: [] as any[],
   marketTrades: [] as any[],
   bitquerySubscription: null as any,
-  botStartTime: 0, // Track when bot actually started
-  firstAnalysisTime: 0, // Track when first analysis should happen
+  botStartTime: 0,
+  firstAnalysisTime: 0,
   metrics: {
     totalBought: 0,
     totalSold: 0,
@@ -20,22 +19,29 @@ const autoSellState = {
     buyVolumeUsd: 0,
     sellVolumeUsd: 0,
     lastSellTrigger: 0,
+    botExecutedSellsUsd: 0,
+    totalMarketSellsUsd: 0,
   },
+  transactionHistory: [] as any[],
   intervals: [] as NodeJS.Timeout[],
   memoryUsage: {
     lastCheck: 0,
     peakRSS: 0,
     warnings: 0,
   },
+  lastActivity: Date.now(),
+  isServerless: true,
 }
 
 // Resource management and cleanup utilities
 class ResourceManager {
   private static connections = new Map<string, any>()
   private static timers = new Set<NodeJS.Timeout>()
+  private static cleanupScheduled = false
 
   static addTimer(timer: NodeJS.Timeout) {
     this.timers.add(timer)
+    this.scheduleCleanup()
   }
 
   static clearTimer(timer: NodeJS.Timeout) {
@@ -55,6 +61,20 @@ class ResourceManager {
     return this.connections.get(key)
   }
 
+  static scheduleCleanup() {
+    if (!this.cleanupScheduled) {
+      this.cleanupScheduled = true
+      // Clean up after 4 minutes of inactivity (before Vercel timeout)
+      setTimeout(() => {
+        if (Date.now() - autoSellState.lastActivity > 240000) {
+          console.log("[VERCEL] Auto-cleanup due to inactivity")
+          this.cleanup()
+        }
+        this.cleanupScheduled = false
+      }, 240000)
+    }
+  }
+
   static cleanup() {
     this.clearAllTimers()
     this.connections.clear()
@@ -63,6 +83,8 @@ class ResourceManager {
 
 export async function POST(request: NextRequest) {
   try {
+    autoSellState.lastActivity = Date.now()
+
     const { config, privateKeys } = await request.json()
 
     if (autoSellState.isRunning) {
@@ -135,7 +157,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `Auto-sell engine started with ${wallets.length} wallets`,
+      message: `Auto-sell engine started with ${wallets.length} wallets (Vercel optimized)`,
       config: autoSellState.config,
       wallets: autoSellState.wallets.map((wallet) => ({
         name: wallet.name,
@@ -151,7 +173,7 @@ export async function POST(request: NextRequest) {
 }
 
 async function startAutoSellEngine() {
-  // Clear any existing intervals
+  ResourceManager.cleanup()
   autoSellState.intervals.forEach((interval) => clearInterval(interval))
   autoSellState.intervals = []
 
@@ -169,15 +191,16 @@ async function startAutoSellEngine() {
 
   const balanceInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
+    autoSellState.lastActivity = Date.now()
+
     try {
       await updateAllWalletBalances()
       console.log("[AUTO-SELL] Wallet balances updated")
-
       monitorMemoryUsage()
     } catch (error) {
       console.error("Balance update error:", error)
     }
-  }, 30000)
+  }, 45000) // Increased to 45 seconds for Vercel
 
   autoSellState.intervals.push(balanceInterval)
   ResourceManager.addTimer(balanceInterval)
@@ -191,8 +214,8 @@ function monitorMemoryUsage() {
     autoSellState.memoryUsage.peakRSS = usage.rss
   }
 
-  // Check every 5 minutes
-  if (now - autoSellState.memoryUsage.lastCheck > 300000) {
+  if (now - autoSellState.memoryUsage.lastCheck > 180000) {
+    // Check every 3 minutes
     autoSellState.memoryUsage.lastCheck = now
 
     const memoryMB = Math.round(usage.rss / 1024 / 1024)
@@ -200,12 +223,11 @@ function monitorMemoryUsage() {
       `[MEMORY] Current: ${memoryMB}MB, Peak: ${Math.round(autoSellState.memoryUsage.peakRSS / 1024 / 1024)}MB`,
     )
 
-    // Warn if memory usage is high
-    if (memoryMB > 1500) {
+    if (memoryMB > 800) {
+      // Reduced from 1500MB
       autoSellState.memoryUsage.warnings++
       console.warn(`[MEMORY] High memory usage detected: ${memoryMB}MB`)
 
-      // Force garbage collection if available
       if (global.gc) {
         global.gc()
         console.log("[MEMORY] Forced garbage collection")
@@ -214,7 +236,7 @@ function monitorMemoryUsage() {
   }
 }
 
-function startConfigurableAnalysisCycle() {
+async function startConfigurableAnalysisCycle() {
   updateSolPrice()
 
   const timeWindowSeconds = autoSellState.config.timeWindowSeconds
@@ -228,9 +250,9 @@ function startConfigurableAnalysisCycle() {
     () => {
       if (!autoSellState.isRunning) return
 
+      autoSellState.lastActivity = Date.now()
       console.log(`[AUTO-SELL] ${timeWindowSeconds}-second wait complete. Starting market analysis...`)
 
-      // Run first analysis
       collectMarketDataForConfigurableWindow()
       analyzeAndExecuteAutoSell()
 
@@ -240,6 +262,8 @@ function startConfigurableAnalysisCycle() {
           ResourceManager.clearTimer(analysisInterval)
           return
         }
+
+        autoSellState.lastActivity = Date.now()
 
         try {
           console.log(`[AUTO-SELL] Starting ${timeWindowSeconds}-second market analysis...`)
@@ -310,7 +334,6 @@ async function collectDirectSolanaTransactions() {
   )
 
   try {
-    // Get recent signatures for the token mint
     const mintPubkey = new PublicKey(autoSellState.config.mint)
 
     const signatures = (await Promise.race([
@@ -332,7 +355,6 @@ async function collectDirectSolanaTransactions() {
       const batchPromises = batch.map(async (sigInfo) => {
         const txTime = (sigInfo.blockTime || 0) * 1000
 
-        // Only process transactions within our time window
         if (txTime < cutoffTime) {
           return null
         }
@@ -348,7 +370,6 @@ async function collectDirectSolanaTransactions() {
 
           if (!tx || !tx.meta) return null
 
-          // Analyze transaction for buy/sell activity
           const tradeInfo = analyzeTransaction(tx, autoSellState.config.mint)
           return { tradeInfo, txTime, signature: sigInfo.signature }
         } catch (txError) {
@@ -380,11 +401,14 @@ async function collectDirectSolanaTransactions() {
     }
 
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
+    autoSellState.metrics.totalMarketSellsUsd = totalSellVolumeUsd
+
+    // Net Flow = Buy Volume USD - Sell Volume USD (market sells only, not including bot sells)
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
     console.log(
-      `[SOLANA-RPC] REAL TRANSACTION DATA - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
+      `[SOLANA-RPC] MARKET DATA - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Market Sells: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
     )
 
     if (buyCount === 0 && sellCount === 0) {
@@ -458,38 +482,38 @@ async function collectDexScreenerData() {
       autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
 
       const timeWindowMinutes = autoSellState.config.timeWindowSeconds / 60
-      const estimatedVolume = (volume24h / (24 * 60)) * timeWindowMinutes // Volume for time window
+      const estimatedVolume = (volume24h / (24 * 60)) * timeWindowMinutes
 
       if (priceChange5m > 0.5) {
-        // Positive price movement suggests buying pressure
         autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.6
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.4
+        autoSellState.metrics.totalMarketSellsUsd = estimatedVolume * 0.4
       } else if (priceChange5m < -0.5) {
-        // Negative price movement suggests selling pressure
         autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.4
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.6
+        autoSellState.metrics.totalMarketSellsUsd = estimatedVolume * 0.6
       } else {
-        // Neutral movement
         autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.5
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.5
+        autoSellState.metrics.totalMarketSellsUsd = estimatedVolume * 0.5
       }
 
+      autoSellState.metrics.sellVolumeUsd = autoSellState.metrics.totalMarketSellsUsd
       autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
 
       console.log(
-        `[DEXSCREENER] Price: $${priceUsd.toFixed(8)} | 5m Change: ${priceChange5m.toFixed(2)}% | Est Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Est Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+        `[DEXSCREENER] Price: $${priceUsd.toFixed(8)} | 5m Change: ${priceChange5m.toFixed(2)}% | Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Market Sells: $${autoSellState.metrics.totalMarketSellsUsd.toFixed(2)} | Bot Sells: $${autoSellState.metrics.botExecutedSellsUsd.toFixed(2)} | Total Sells: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
       )
     } else {
       console.log("[DEXSCREENER] No trading pairs found")
       autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
+      autoSellState.metrics.totalMarketSellsUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0 // No market sells detected
+      autoSellState.metrics.netUsdFlow = 0 - 0 // Buy Volume USD - Sell Volume USD = 0
     }
   } catch (error) {
     console.error("[DEXSCREENER] Data collection failed:", error)
     autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
+    autoSellState.metrics.totalMarketSellsUsd = 0
+    autoSellState.metrics.sellVolumeUsd = 0 // No market sells
+    autoSellState.metrics.netUsdFlow = 0 - 0 // Buy Volume USD - Sell Volume USD = 0
   }
 }
 
@@ -511,42 +535,63 @@ async function analyzeAndExecuteAutoSell() {
         return
       }
 
-      console.log(`[AUTO-SELL] 🚀 EXECUTING IMMEDIATE SELL! No cooldown restrictions.`)
+      console.log(`[AUTO-SELL] 🚀 AUTOMATIC SELL TRIGGERED! Executing immediately...`)
+      console.log(`[AUTO-SELL] 🎯 Sell Parameters:`)
+      console.log(`[AUTO-SELL]   - Net USD Flow: $${netUsdFlow.toFixed(2)}`)
+      console.log(`[AUTO-SELL]   - Sell Percentage: ${autoSellState.config.sellPercentageOfNetFlow}%`)
+      console.log(
+        `[AUTO-SELL]   - Target Sell Amount: $${((netUsdFlow * autoSellState.config.sellPercentageOfNetFlow) / 100).toFixed(2)}`,
+      )
 
-      console.log(`[AUTO-SELL] Step 1: Updating token price...`)
-      await updateTokenPrice()
-      console.log(`[AUTO-SELL] Step 1 Complete: Current price = $${autoSellState.metrics.currentPriceUsd}`)
+      // Mark sell as triggered immediately to prevent double execution
+      autoSellState.metrics.lastSellTrigger = currentTime
 
-      console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
-      await updateAllWalletBalances()
-      const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
-      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
+      try {
+        console.log(`[AUTO-SELL] Step 1: Updating token price...`)
+        await updateTokenPrice()
+        console.log(`[AUTO-SELL] Step 1 Complete: Current price = $${autoSellState.metrics.currentPriceUsd}`)
 
-      console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
-      await executeCoordinatedSell(netUsdFlow)
-      console.log(`[AUTO-SELL] Step 3 Complete: Sell execution finished`)
+        console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
+        await updateAllWalletBalances()
+        const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
+        console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
+
+        console.log(`[AUTO-SELL] Step 3: Executing coordinated sell across all wallets...`)
+        await executeCoordinatedSell(netUsdFlow)
+        console.log(`[AUTO-SELL] Step 3 Complete: ✅ AUTOMATIC SELL EXECUTION FINISHED`)
+
+        console.log(`[AUTO-SELL] 🎉 SUCCESS! Automatic sell completed at ${new Date().toISOString()}`)
+      } catch (sellError) {
+        console.error(`[AUTO-SELL] ❌ AUTOMATIC SELL FAILED:`, sellError)
+        // Reset the trigger time so it can try again on next cycle
+        autoSellState.metrics.lastSellTrigger = 0
+        throw sellError
+      }
     } else {
-      console.log(`[AUTO-SELL] ❌ Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd}, no sell triggered`)
+      console.log(
+        `[AUTO-SELL] ❌ Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd}, no automatic sell triggered`,
+      )
     }
   } catch (error) {
-    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in analysis and execution:", error)
+    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in automatic sell analysis:", error)
     console.error("[AUTO-SELL] Error stack:", error.stack)
   }
 }
 
 async function executeCoordinatedSell(netUsdFlow: number) {
   try {
-    console.log(`[AUTO-SELL] 🎯 STARTING COORDINATED SELL EXECUTION`)
-    console.log(`[AUTO-SELL] Input parameters: netUsdFlow = $${netUsdFlow.toFixed(2)}`)
+    console.log(`[AUTO-SELL] 🎯 STARTING AUTOMATIC COORDINATED SELL`)
+    console.log(`[AUTO-SELL] Net Flow Calculation: Buy Volume USD - Sell Volume USD = $${netUsdFlow.toFixed(2)}`)
 
-    const sellPercentage = autoSellState.config.sellPercentageOfNetFlow
+    // Sell Amount: 25% of the positive net flow
+    const sellPercentage = autoSellState.config.sellPercentageOfNetFlow || 25
     const usdAmountToSell = (netUsdFlow * sellPercentage) / 100
 
     console.log(
-      `[AUTO-SELL] Calculated sell amount: ${sellPercentage}% of $${netUsdFlow.toFixed(2)} = $${usdAmountToSell.toFixed(2)}`,
+      `[AUTO-SELL] 💰 AUTOMATIC SELL: ${sellPercentage}% of positive net flow $${netUsdFlow.toFixed(2)} = $${usdAmountToSell.toFixed(2)} worth of tokens`,
     )
 
-    console.log(`[AUTO-SELL] 🔄 Attempting fresh price fetch...`)
+    console.log(`[AUTO-SELL] 🔄 Fetching fresh token price for accurate sell calculation...`)
     let effectivePriceUsd = 0
     let priceAttempts = 0
 
@@ -574,7 +619,7 @@ async function executeCoordinatedSell(netUsdFlow: number) {
         priceAttempts++
         console.log(`[AUTO-SELL] Price attempt ${priceAttempts}: Jupiter price discovery...`)
         const jupiterBase = process.env.JUPITER_BASE || "https://quote-api.jup.ag"
-        const testAmount = "1000000" // 1 token in smallest units
+        const testAmount = "1000000"
 
         const quoteResponse = await fetch(
           `${jupiterBase}/v6/quote?inputMint=${autoSellState.config.mint}&outputMint=So11111111111111111111111111111111111111112&amount=${testAmount}&slippageBps=500`,
@@ -595,7 +640,6 @@ async function executeCoordinatedSell(netUsdFlow: number) {
       }
     }
 
-    // Use fallback price if all else fails
     if (effectivePriceUsd <= 0) {
       effectivePriceUsd = 0.000001
       console.log(`[AUTO-SELL] ⚠️ Using emergency fallback price: $${effectivePriceUsd.toFixed(8)}`)
@@ -603,20 +647,20 @@ async function executeCoordinatedSell(netUsdFlow: number) {
 
     const tokensToSell = usdAmountToSell / effectivePriceUsd
     console.log(
-      `[AUTO-SELL] Token calculation: $${usdAmountToSell.toFixed(2)} ÷ $${effectivePriceUsd.toFixed(8)} = ${tokensToSell.toFixed(4)} tokens`,
+      `[AUTO-SELL] 🧮 Token calculation: $${usdAmountToSell.toFixed(2)} ÷ $${effectivePriceUsd.toFixed(8)} = ${tokensToSell.toFixed(4)} tokens to sell`,
     )
 
-    console.log(`[AUTO-SELL] 🔍 Validating wallets...`)
+    console.log(`[AUTO-SELL] 🔍 Validating all connected wallets...`)
     const walletsWithTokens = autoSellState.wallets.filter((wallet) => {
       const hasTokens = wallet.tokenBalance > 0
       console.log(
-        `[AUTO-SELL] ${wallet.name}: ${wallet.tokenBalance.toFixed(4)} tokens - ${hasTokens ? "ELIGIBLE" : "SKIP"}`,
+        `[AUTO-SELL] ${wallet.name}: ${wallet.tokenBalance.toFixed(4)} tokens - ${hasTokens ? "✅ WILL SELL" : "❌ SKIP (no tokens)"}`,
       )
       return hasTokens
     })
 
     if (walletsWithTokens.length === 0) {
-      console.log("[AUTO-SELL] ❌ EXECUTION STOPPED: No wallets have tokens to sell")
+      console.log("[AUTO-SELL] ❌ AUTOMATIC SELL STOPPED: No wallets have tokens to sell")
       console.log("[AUTO-SELL] Wallet details:")
       autoSellState.wallets.forEach((wallet) => {
         console.log(
@@ -628,8 +672,9 @@ async function executeCoordinatedSell(netUsdFlow: number) {
 
     const totalTokensHeld = walletsWithTokens.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
     console.log(
-      `[AUTO-SELL] ✅ ${walletsWithTokens.length}/${autoSellState.wallets.length} wallets eligible, total tokens: ${totalTokensHeld.toFixed(4)}`,
+      `[AUTO-SELL] ✅ ${walletsWithTokens.length}/${autoSellState.wallets.length} wallets will participate in automatic sell`,
     )
+    console.log(`[AUTO-SELL] 📊 Total tokens available: ${totalTokensHeld.toFixed(4)}`)
 
     let adjustedTokensToSell = Math.min(tokensToSell, totalTokensHeld * 0.25)
     if (adjustedTokensToSell < totalTokensHeld * 0.001) {
@@ -637,80 +682,113 @@ async function executeCoordinatedSell(netUsdFlow: number) {
       console.log(`[AUTO-SELL] 📈 Adjusted to minimum sell amount: ${adjustedTokensToSell.toFixed(4)} tokens`)
     }
 
+    const sellPercentageOfHoldings = (adjustedTokensToSell / totalTokensHeld) * 100
     console.log(
-      `[AUTO-SELL] 🎯 FINAL SELL: ${adjustedTokensToSell.toFixed(4)} tokens (${((adjustedTokensToSell / totalTokensHeld) * 100).toFixed(1)}% of holdings)`,
+      `[AUTO-SELL] 🎯 FINAL AUTOMATIC SELL: ${adjustedTokensToSell.toFixed(4)} tokens (${sellPercentageOfHoldings.toFixed(1)}% of total holdings)`,
     )
 
-    console.log(`[AUTO-SELL] 🚀 STARTING INDIVIDUAL WALLET SELLS...`)
+    console.log(`[AUTO-SELL] 🚀 EXECUTING AUTOMATIC SELLS ACROSS ALL ELIGIBLE WALLETS...`)
 
     const sellPromises = walletsWithTokens.map(async (wallet, index) => {
       const walletProportion = wallet.tokenBalance / totalTokensHeld
       const walletSellAmount = adjustedTokensToSell * walletProportion
 
-      console.log(`[AUTO-SELL] Wallet ${index + 1}/${walletsWithTokens.length}: ${wallet.name}`)
-      console.log(`[AUTO-SELL]   Proportion: ${(walletProportion * 100).toFixed(2)}%`)
-      console.log(`[AUTO-SELL]   Sell amount: ${walletSellAmount.toFixed(4)} tokens`)
+      console.log(`[AUTO-SELL] 🔥 Wallet ${index + 1}/${walletsWithTokens.length}: ${wallet.name}`)
+      console.log(
+        `[AUTO-SELL]   📊 Holdings: ${wallet.tokenBalance.toFixed(4)} tokens (${(walletProportion * 100).toFixed(2)}% of total)`,
+      )
+      console.log(`[AUTO-SELL]   💰 Will sell: ${walletSellAmount.toFixed(4)} tokens`)
 
       if (walletSellAmount < 0.000001) {
-        console.log(`[AUTO-SELL]   ⚠️ Amount too small, skipping`)
+        console.log(`[AUTO-SELL]   ⚠️ Amount too small, skipping this wallet`)
         return null
       }
 
       try {
-        console.log(`[AUTO-SELL]   🔥 Executing sell...`)
+        console.log(`[AUTO-SELL]   🚀 Executing automatic sell...`)
         const signature = await executeSell(wallet, walletSellAmount)
         const estimatedUsdValue = walletSellAmount * effectivePriceUsd
 
-        console.log(`[AUTO-SELL]   ✅ SUCCESS: ${signature}`)
-        console.log(`[AUTO-SELL]   💰 Value: ~$${estimatedUsdValue.toFixed(2)} USD`)
+        console.log(`[AUTO-SELL]   ✅ AUTOMATIC SELL SUCCESS!`)
+        console.log(`[AUTO-SELL]   📝 Transaction: ${signature}`)
+        console.log(`[AUTO-SELL]   💵 Estimated value: ~$${estimatedUsdValue.toFixed(2)} USD`)
 
-        return { wallet: wallet.name, amount: walletSellAmount, usdValue: estimatedUsdValue, signature }
+        return {
+          wallet: wallet.name,
+          amount: walletSellAmount,
+          usdValue: estimatedUsdValue,
+          signature,
+          timestamp: new Date().toISOString(),
+        }
       } catch (error) {
-        console.error(`[AUTO-SELL]   ❌ FAILED: ${error.message}`)
+        console.error(`[AUTO-SELL]   ❌ AUTOMATIC SELL FAILED: ${error.message}`)
         console.error(`[AUTO-SELL]   Error details:`, error)
         return null
       }
     })
 
-    console.log(`[AUTO-SELL] ⏳ Waiting for all ${walletsWithTokens.length} sell transactions...`)
+    console.log(`[AUTO-SELL] ⏳ Waiting for all ${walletsWithTokens.length} automatic sell transactions...`)
     const results = await Promise.all(sellPromises)
     const successfulSells = results.filter((result) => result !== null)
 
-    console.log(`[AUTO-SELL] 📊 EXECUTION RESULTS:`)
-    console.log(`[AUTO-SELL]   Attempted: ${walletsWithTokens.length} wallets`)
-    console.log(`[AUTO-SELL]   Successful: ${successfulSells.length} wallets`)
-    console.log(`[AUTO-SELL]   Failed: ${walletsWithTokens.length - successfulSells.length} wallets`)
+    console.log(`[AUTO-SELL] 📊 AUTOMATIC SELL EXECUTION RESULTS:`)
+    console.log(`[AUTO-SELL]   🎯 Target: Sell $${usdAmountToSell.toFixed(2)} worth (${sellPercentage}% of net flow)`)
+    console.log(`[AUTO-SELL]   📈 Attempted: ${walletsWithTokens.length} wallets`)
+    console.log(`[AUTO-SELL]   ✅ Successful: ${successfulSells.length} wallets`)
+    console.log(`[AUTO-SELL]   ❌ Failed: ${walletsWithTokens.length - successfulSells.length} wallets`)
 
     if (successfulSells.length > 0) {
       const totalSold = successfulSells.reduce((sum, result) => sum + result.amount, 0)
       const totalUsdValue = successfulSells.reduce((sum, result) => sum + result.usdValue, 0)
 
-      autoSellState.metrics.lastSellTrigger = Date.now()
       autoSellState.metrics.totalSold += totalSold
+      autoSellState.metrics.botExecutedSellsUsd += totalUsdValue
 
-      console.log(`[AUTO-SELL] 🎉 SELL EXECUTION COMPLETE!`)
-      console.log(`[AUTO-SELL]   Total sold: ${totalSold.toFixed(4)} tokens`)
-      console.log(`[AUTO-SELL]   Total value: ~$${totalUsdValue.toFixed(2)} USD`)
+      successfulSells.forEach((result) => {
+        autoSellState.transactionHistory.unshift({
+          type: "sell",
+          wallet: result.wallet,
+          tokenAmount: result.amount,
+          usdValue: result.usdValue,
+          price: effectivePriceUsd,
+          signature: result.signature,
+          timestamp: result.timestamp,
+          triggerReason: `Auto-sell triggered by $${netUsdFlow.toFixed(2)} net flow`,
+        })
+      })
+
+      if (autoSellState.transactionHistory.length > 50) {
+        autoSellState.transactionHistory = autoSellState.transactionHistory.slice(0, 50)
+      }
+
+      console.log(`[AUTO-SELL] 🎉 AUTOMATIC SELL EXECUTION COMPLETE!`)
+      console.log(`[AUTO-SELL]   💎 Total tokens sold: ${totalSold.toFixed(4)}`)
+      console.log(`[AUTO-SELL]   💰 Total USD value: ~$${totalUsdValue.toFixed(2)}`)
+      console.log(`[AUTO-SELL]   📊 Bot executed sells total: $${autoSellState.metrics.botExecutedSellsUsd.toFixed(2)}`)
       console.log(
-        `[AUTO-SELL]   Success rate: ${((successfulSells.length / walletsWithTokens.length) * 100).toFixed(1)}%`,
+        `[AUTO-SELL]   📊 Success rate: ${((successfulSells.length / walletsWithTokens.length) * 100).toFixed(1)}%`,
       )
+      console.log(`[AUTO-SELL]   ⏰ Completed at: ${new Date().toISOString()}`)
 
+      console.log(`[AUTO-SELL] 📋 TRANSACTION DETAILS:`)
       successfulSells.forEach((result, index) => {
         console.log(
           `[AUTO-SELL]   ${index + 1}. ${result.wallet}: ${result.amount.toFixed(4)} tokens → $${result.usdValue.toFixed(2)} | ${result.signature}`,
         )
       })
 
-      console.log(`[AUTO-SELL] 🔄 Updating wallet balances after execution...`)
+      console.log(`[AUTO-SELL] 🔄 Updating wallet balances after automatic execution...`)
       await updateAllWalletBalances()
-      console.log(`[AUTO-SELL] ✅ Balance update complete`)
+      console.log(`[AUTO-SELL] ✅ Balance update complete - ready for next automatic sell trigger`)
     } else {
-      console.log("[AUTO-SELL] ❌ COMPLETE FAILURE: No successful sells executed")
-      console.log("[AUTO-SELL] This indicates a systematic issue with sell execution")
+      console.log("[AUTO-SELL] ❌ COMPLETE AUTOMATIC SELL FAILURE: No successful sells executed")
+      console.log("[AUTO-SELL] This indicates a systematic issue with automatic sell execution")
+      autoSellState.metrics.lastSellTrigger = 0
     }
   } catch (error) {
-    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in executeCoordinatedSell:", error)
+    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in automatic coordinated sell:", error)
     console.error("[AUTO-SELL] Error stack:", error.stack)
+    autoSellState.metrics.lastSellTrigger = 0
     throw error
   }
 }
@@ -897,7 +975,7 @@ async function updateSolPrice() {
 }
 
 process.on("SIGTERM", () => {
-  console.log("[AUTO-SELL] Received SIGTERM, shutting down gracefully...")
+  console.log("[AUTO-SELL] Received SIGTERM (Vercel), shutting down gracefully...")
   gracefulShutdown()
 })
 
@@ -925,8 +1003,7 @@ function gracefulShutdown() {
     ResourceManager.cleanup()
   }
 
-  // Give time for cleanup
   setTimeout(() => {
     process.exit(0)
-  }, 2000)
+  }, 1000) // Reduced from 2000ms
 }
