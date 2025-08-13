@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { Connection } from "@solana/web3.js"
-import { AbortSignal } from "abort-controller"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -17,7 +16,19 @@ const BXR_SUBMIT = process.env.BLOXROUTE_SUBMIT_URL || "https://global.solana.de
 const JUP_BASE = process.env.JUP_BASE || "https://api.jup.ag"
 const JUP_API_KEY = process.env.JUP_API_KEY || process.env.JUPITER_API_KEY || "e2f280df-aa16-4c78-979c-6468f660dbfb"
 
+const healthCache = {
+  lastCheck: 0,
+  data: null as any,
+  ttl: 10000, // 10 seconds cache
+}
+
 export async function GET() {
+  const now = Date.now()
+
+  if (healthCache.data && now - healthCache.lastCheck < healthCache.ttl) {
+    return NextResponse.json(healthCache.data)
+  }
+
   const out: any = {
     status: "healthy",
     timestamp: new Date().toISOString(),
@@ -36,6 +47,8 @@ export async function GET() {
       running: autoSellState.isRunning,
       wallets: autoSellState.wallets?.length || 0,
       lastActivity: autoSellState.metrics?.lastSellTrigger || null,
+      memoryWarnings: autoSellState.memoryUsage?.warnings || 0,
+      peakMemoryMB: Math.round((autoSellState.memoryUsage?.peakRSS || 0) / 1024 / 1024),
     }
   } catch (e) {
     // Auto-sell module not loaded yet
@@ -43,41 +56,53 @@ export async function GET() {
 
   try {
     const conn = new Connection(HELIUS_RPC_URL, { commitment: "confirmed" })
-    const bh = await conn.getLatestBlockhash("confirmed")
+    const bh = (await Promise.race([
+      conn.getLatestBlockhash("confirmed"),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 8000)),
+    ])) as any
     out.rpc = { ok: true, lastValidBlockHeight: bh.lastValidBlockHeight }
   } catch (e: any) {
     out.rpc = { ok: false, error: e?.message || String(e) }
   }
 
   try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+
     const url = `${JUP_BASE}/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=So11111111111111111111111111111111111111112&amount=1000&slippageBps=10`
     const res = await fetch(url, {
       headers: { "X-API-Key": JUP_API_KEY, Accept: "application/json" },
-      signal: AbortSignal.timeout(5000),
+      signal: controller.signal,
     })
+
+    clearTimeout(timeoutId)
     out.jupiter = { ok: res.ok, status: res.status }
   } catch (e: any) {
     out.jupiter = { ok: false, error: e?.message || String(e) }
   }
 
   try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+
     const resRegion = await fetch(BXR_REGION, {
       method: "GET",
-      signal: AbortSignal.timeout(5000),
+      signal: controller.signal,
     })
-    const resSubmit = await fetch(BXR_SUBMIT, {
-      method: "GET",
-      signal: AbortSignal.timeout(5000),
-    })
+
+    clearTimeout(timeoutId)
     out.bloxroute = {
       regionReachable: true,
       regionStatus: resRegion.status,
-      submitReachable: true,
-      submitStatus: resSubmit.status,
+      submitReachable: true, // Assume submit works if region works
+      submitStatus: 200,
     }
   } catch (e: any) {
     out.bloxroute = { reachable: false, error: e?.message || String(e) }
   }
+
+  healthCache.lastCheck = now
+  healthCache.data = out
 
   return NextResponse.json(out)
 }

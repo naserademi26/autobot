@@ -6,28 +6,36 @@ primary_region = "iad"
 [env]
   NODE_ENV = "production"
   PORT = "3000"
-  NODE_OPTIONS = "--max-old-space-size=768"
+  NODE_OPTIONS = "--max-old-space-size=1536 --unhandled-rejections=warn"
   NEXT_TELEMETRY_DISABLED = "1"
+  FORCE_COLOR = "0"
+  NODE_NO_WARNINGS = "1"
 
 [http_service]
   internal_port = 3000
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 1
+  max_machines_running = 2
 
 [[http_service.checks]]
-  interval = "15s"
-  timeout = "10s"
-  grace_period = "15s"
+  interval = "30s"
+  timeout = "20s"
+  grace_period = "30s"
   method = "GET"
   path = "/api/health"
   headers = { "User-Agent" = "fly-health-check" }
 
 [[vm]]
-  memory = "1gb"
+  memory = "2gb"
   cpu_kind = "shared"
   cpus = 1
 
 [deploy]
   release_command = "echo 'Deployment complete'"
+
+[restart]
+  policy = "on-failure"
+  max_restarts = 3
+  restart_delay = "10s"

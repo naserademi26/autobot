@@ -22,6 +22,43 @@ const autoSellState = {
     lastSellTrigger: 0,
   },
   intervals: [] as NodeJS.Timeout[],
+  memoryUsage: {
+    lastCheck: 0,
+    peakRSS: 0,
+    warnings: 0,
+  },
+}
+
+// Resource management and cleanup utilities
+class ResourceManager {
+  private static connections = new Map<string, any>()
+  private static timers = new Set<NodeJS.Timeout>()
+
+  static addTimer(timer: NodeJS.Timeout) {
+    this.timers.add(timer)
+  }
+
+  static clearTimer(timer: NodeJS.Timeout) {
+    clearInterval(timer)
+    this.timers.delete(timer)
+  }
+
+  static clearAllTimers() {
+    this.timers.forEach((timer) => clearInterval(timer))
+    this.timers.clear()
+  }
+
+  static getConnection(key: string, factory: () => any) {
+    if (!this.connections.has(key)) {
+      this.connections.set(key, factory())
+    }
+    return this.connections.get(key)
+  }
+
+  static cleanup() {
+    this.clearAllTimers()
+    this.connections.clear()
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -36,6 +73,10 @@ export async function POST(request: NextRequest) {
     if (!config.mint || !privateKeys || privateKeys.length === 0) {
       return NextResponse.json({ error: "Invalid configuration or no wallets provided" }, { status: 400 })
     }
+
+    ResourceManager.cleanup()
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
 
     // Initialize wallets
     const { Keypair } = await import("@solana/web3.js")
@@ -131,12 +172,46 @@ async function startAutoSellEngine() {
     try {
       await updateAllWalletBalances()
       console.log("[AUTO-SELL] Wallet balances updated")
+
+      monitorMemoryUsage()
     } catch (error) {
       console.error("Balance update error:", error)
     }
   }, 30000)
 
   autoSellState.intervals.push(balanceInterval)
+  ResourceManager.addTimer(balanceInterval)
+}
+
+function monitorMemoryUsage() {
+  const usage = process.memoryUsage()
+  const now = Date.now()
+
+  if (usage.rss > autoSellState.memoryUsage.peakRSS) {
+    autoSellState.memoryUsage.peakRSS = usage.rss
+  }
+
+  // Check every 5 minutes
+  if (now - autoSellState.memoryUsage.lastCheck > 300000) {
+    autoSellState.memoryUsage.lastCheck = now
+
+    const memoryMB = Math.round(usage.rss / 1024 / 1024)
+    console.log(
+      `[MEMORY] Current: ${memoryMB}MB, Peak: ${Math.round(autoSellState.memoryUsage.peakRSS / 1024 / 1024)}MB`,
+    )
+
+    // Warn if memory usage is high
+    if (memoryMB > 1500) {
+      autoSellState.memoryUsage.warnings++
+      console.warn(`[MEMORY] High memory usage detected: ${memoryMB}MB`)
+
+      // Force garbage collection if available
+      if (global.gc) {
+        global.gc()
+        console.log("[MEMORY] Forced garbage collection")
+      }
+    }
+  }
 }
 
 function startConfigurableAnalysisCycle() {
@@ -149,7 +224,7 @@ function startConfigurableAnalysisCycle() {
 
   const timeUntilFirstAnalysis = autoSellState.firstAnalysisTime - Date.now()
 
-  setTimeout(
+  const firstAnalysisTimeout = setTimeout(
     () => {
       if (!autoSellState.isRunning) return
 
@@ -162,6 +237,7 @@ function startConfigurableAnalysisCycle() {
       const analysisInterval = setInterval(async () => {
         if (!autoSellState.isRunning) {
           clearInterval(analysisInterval)
+          ResourceManager.clearTimer(analysisInterval)
           return
         }
 
@@ -175,9 +251,12 @@ function startConfigurableAnalysisCycle() {
       }, timeWindowMs)
 
       autoSellState.intervals.push(analysisInterval)
+      ResourceManager.addTimer(analysisInterval)
     },
     Math.max(0, timeUntilFirstAnalysis),
   )
+
+  ResourceManager.addTimer(firstAnalysisTimeout as any)
 }
 
 async function collectMarketDataForConfigurableWindow() {
@@ -207,11 +286,20 @@ async function collectMarketDataForConfigurableWindow() {
 async function collectDirectSolanaTransactions() {
   const { Connection, PublicKey } = await import("@solana/web3.js")
 
-  const connection = new Connection(
-    process.env.NEXT_PUBLIC_RPC_URL ||
-      process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
-      "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
-    { commitment: "confirmed" },
+  const connection = ResourceManager.getConnection(
+    "solana-rpc",
+    () =>
+      new Connection(
+        process.env.NEXT_PUBLIC_RPC_URL ||
+          process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+          "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+        {
+          commitment: "confirmed",
+          httpHeaders: {
+            "User-Agent": "solana-auto-sell-bot/1.0",
+          },
+        },
+      ),
   )
 
   const timeWindowSeconds = autoSellState.config.timeWindowSeconds
@@ -224,9 +312,11 @@ async function collectDirectSolanaTransactions() {
   try {
     // Get recent signatures for the token mint
     const mintPubkey = new PublicKey(autoSellState.config.mint)
-    const signatures = await connection.getSignaturesForAddress(mintPubkey, {
-      limit: 50,
-    })
+
+    const signatures = (await Promise.race([
+      connection.getSignaturesForAddress(mintPubkey, { limit: 50 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("RPC timeout")), 15000)),
+    ])) as any[]
 
     console.log(`[SOLANA-RPC] Found ${signatures.length} recent signatures`)
 
@@ -235,45 +325,58 @@ async function collectDirectSolanaTransactions() {
     let buyCount = 0
     let sellCount = 0
 
-    // Process each transaction
-    for (const sigInfo of signatures) {
-      const txTime = (sigInfo.blockTime || 0) * 1000
+    const concurrencyLimit = 5
+    for (let i = 0; i < signatures.length; i += concurrencyLimit) {
+      const batch = signatures.slice(i, i + concurrencyLimit)
 
-      // Only process transactions within our time window
-      if (txTime < cutoffTime) {
-        continue
-      }
+      const batchPromises = batch.map(async (sigInfo) => {
+        const txTime = (sigInfo.blockTime || 0) * 1000
 
-      try {
-        const tx = await connection.getTransaction(sigInfo.signature, {
-          commitment: "confirmed",
-          maxSupportedTransactionVersion: 0,
-        })
+        // Only process transactions within our time window
+        if (txTime < cutoffTime) {
+          return null
+        }
 
-        if (!tx || !tx.meta) continue
+        try {
+          const tx = await Promise.race([
+            connection.getTransaction(sigInfo.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0,
+            }),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("TX timeout")), 10000)),
+          ])
 
-        // Analyze transaction for buy/sell activity
-        const tradeInfo = analyzeTransaction(tx, autoSellState.config.mint)
+          if (!tx || !tx.meta) return null
 
-        if (tradeInfo) {
+          // Analyze transaction for buy/sell activity
+          const tradeInfo = analyzeTransaction(tx, autoSellState.config.mint)
+          return { tradeInfo, txTime, signature: sigInfo.signature }
+        } catch (txError) {
+          return null
+        }
+      })
+
+      const batchResults = await Promise.allSettled(batchPromises)
+
+      batchResults.forEach((result) => {
+        if (result.status === "fulfilled" && result.value?.tradeInfo) {
+          const { tradeInfo, txTime, signature } = result.value
+
           if (tradeInfo.type === "buy") {
             totalBuyVolumeUsd += tradeInfo.usdAmount
             buyCount++
             console.log(
-              `[SOLANA-RPC] BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${signature.substring(0, 8)}...)`,
             )
           } else if (tradeInfo.type === "sell") {
             totalSellVolumeUsd += tradeInfo.usdAmount
             sellCount++
             console.log(
-              `[SOLANA-RPC] SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${signature.substring(0, 8)}...)`,
             )
           }
         }
-      } catch (txError) {
-        // Skip failed transaction parsing
-        continue
-      }
+      })
     }
 
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
@@ -795,30 +898,35 @@ async function updateSolPrice() {
 
 process.on("SIGTERM", () => {
   console.log("[AUTO-SELL] Received SIGTERM, shutting down gracefully...")
-  if (autoSellState.isRunning) {
-    autoSellState.isRunning = false
-    autoSellState.intervals.forEach((interval) => clearInterval(interval))
-    autoSellState.intervals = []
-  }
-  process.exit(0)
+  gracefulShutdown()
 })
 
 process.on("SIGINT", () => {
   console.log("[AUTO-SELL] Received SIGINT, shutting down gracefully...")
-  if (autoSellState.isRunning) {
-    autoSellState.isRunning = false
-    autoSellState.intervals.forEach((interval) => clearInterval(interval))
-    autoSellState.intervals = []
-  }
-  process.exit(0)
+  gracefulShutdown()
 })
 
 process.on("uncaughtException", (error) => {
   console.error("[AUTO-SELL] Uncaught Exception:", error)
-  // Don't exit, just log the error
+  console.error("[AUTO-SELL] Stack:", error.stack)
+  // Don't exit immediately, try to recover
 })
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("[AUTO-SELL] Unhandled Rejection at:", promise, "reason:", reason)
-  // Don't exit, just log the error
+  // Don't exit immediately, try to recover
 })
+
+function gracefulShutdown() {
+  if (autoSellState.isRunning) {
+    autoSellState.isRunning = false
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
+    ResourceManager.cleanup()
+  }
+
+  // Give time for cleanup
+  setTimeout(() => {
+    process.exit(0)
+  }, 2000)
+}

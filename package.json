@@ -44,7 +44,6 @@
     "@solana/spl-token": "latest",
     "@solana/web3.js": "latest",
     "@upstash/redis": "latest",
-    "abort-controller": "latest",
     "autoprefixer": "^10.4.20",
     "axios": "latest",
     "bs58": "latest",
