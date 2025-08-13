@@ -194,24 +194,28 @@ async function startAutoSellEngine() {
 
   autoSellState.errorCount = 0
   autoSellState.lastError = null
-  autoSellState.metrics.analysisWindowStart = Date.now()
-  autoSellState.metrics.windowCompleted = false
 
-  console.log(`[ENGINE] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
+  console.log(`[ENGINE] Starting simplified 2-minute analysis cycle`)
 
-  await new Promise((resolve) => setTimeout(resolve, 2000))
-
+  console.log("[ENGINE] Fetching initial wallet balances...")
   try {
-    console.log("[ENGINE] Testing initial connectivity...")
-    await testConnectivity()
-    console.log("[ENGINE] Connectivity test passed")
-  } catch (connectivityError) {
-    console.warn("[ENGINE] Initial connectivity test failed, but continuing:", connectivityError)
+    await updateAllWalletBalances()
+    console.log("[ENGINE] Initial wallet balances fetched successfully")
+
+    // Log current balances for debugging
+    autoSellState.wallets.forEach((wallet, index) => {
+      console.log(
+        `[BALANCE] ${wallet.name}: ${wallet.balance.toFixed(4)} SOL, ${wallet.tokenBalance.toFixed(2)} tokens`,
+      )
+    })
+  } catch (balanceError) {
+    console.warn("[ENGINE] Initial balance fetch failed:", balanceError)
   }
 
-  const marketMonitorInterval = setInterval(async () => {
+  const mainAnalysisInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
 
+    // Check max runtime
     if (Date.now() - autoSellState.startTime > autoSellState.maxRunTimeMs) {
       console.log("[ENGINE] Max runtime reached, shutting down")
       await stopAutoSellEngine()
@@ -219,109 +223,86 @@ async function startAutoSellEngine() {
     }
 
     try {
-      await monitorMarketActivity()
-      if (autoSellState.errorCount > 0) {
-        autoSellState.errorCount = Math.max(0, autoSellState.errorCount - 2)
-      }
+      console.log(`[ANALYSIS CYCLE] Starting new 2-minute analysis cycle...`)
+
+      // Reset metrics for new cycle
+      autoSellState.marketTrades = []
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
+
+      // Collect market data for 2 minutes
+      await collectMarketDataFor2Minutes()
+
+      // After 2 minutes, analyze and make sell decision
+      await analyzeAndExecuteSell()
+
+      // Update wallet balances after analysis
+      await updateAllWalletBalances()
+
+      console.log(`[ANALYSIS CYCLE] Cycle completed, starting next cycle...`)
     } catch (error: any) {
       autoSellState.errorCount++
-      autoSellState.lastError = error?.message || "Market monitoring error"
-      console.error("Market monitoring error:", error)
+      autoSellState.lastError = error?.message || "Analysis cycle error"
+      console.error("Analysis cycle error:", error)
 
-      const startupPeriod = 5 * 60 * 1000 // 5 minutes
-      const isStartupPeriod = Date.now() - autoSellState.startTime < startupPeriod
-      const errorThreshold = isStartupPeriod ? 20 : 10
-
-      if (autoSellState.errorCount > errorThreshold) {
+      if (autoSellState.errorCount > 10) {
         console.error(`Too many errors (${autoSellState.errorCount}), stopping auto-sell engine`)
         await stopAutoSellEngine()
       }
     }
-  }, 15000) // Increased to 15 seconds to reduce load
+  }, autoSellState.config.timeWindowSeconds * 1000) // Every 2 minutes (or configured time window)
 
-  const executionInterval = setInterval(async () => {
-    if (!autoSellState.isRunning) return
+  autoSellState.intervals.push(mainAnalysisInterval)
+  autoSellState.intervalIds.add(mainAnalysisInterval)
 
-    try {
-      await checkAndExecuteAutoSell()
-    } catch (error: any) {
-      autoSellState.errorCount++
-      autoSellState.lastError = error?.message || "Auto-sell execution error"
-      console.error("Auto-sell execution error:", error)
-
-      if (autoSellState.errorCount > 25) {
-        console.error("Too many errors, stopping auto-sell engine")
-        await stopAutoSellEngine()
-      }
-    }
-  }, 45000) // Increased to 45 seconds
-
-  const balanceInterval = setInterval(async () => {
-    if (!autoSellState.isRunning) return
-
-    try {
-      await updateAllWalletBalances()
-    } catch (error: any) {
-      console.error("Balance update error:", error)
-    }
-  }, 90000) // Increased to 90 seconds to reduce load
-
-  autoSellState.intervals.push(marketMonitorInterval, executionInterval, balanceInterval)
-  autoSellState.intervalIds.add(marketMonitorInterval)
-  autoSellState.intervalIds.add(executionInterval)
-  autoSellState.intervalIds.add(balanceInterval)
-
-  console.log("[ENGINE] All intervals started successfully")
+  console.log("[ENGINE] Simplified 2-minute analysis cycle started")
 }
 
-async function testConnectivity() {
-  const testPromises = []
+async function collectMarketDataFor2Minutes() {
+  const startTime = Date.now()
+  const endTime = startTime + autoSellState.config.timeWindowSeconds * 1000
+  const collectInterval = 15000 // Collect data every 15 seconds during the 2-minute window
 
-  // Test SOL price API
-  testPromises.push(
-    fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd", {
-      signal: AbortSignal.timeout(5000),
-      headers: { "User-Agent": "AutoSellBot/1.0" },
-    })
-      .then((r) => (r.ok ? "SOL_PRICE_OK" : "SOL_PRICE_FAIL"))
-      .catch(() => "SOL_PRICE_FAIL"),
-  )
+  console.log(`[DATA COLLECTION] Collecting market data for ${autoSellState.config.timeWindowSeconds} seconds...`)
 
-  // Test DexScreener API
-  testPromises.push(
-    fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
-      signal: AbortSignal.timeout(8000),
-      headers: { "User-Agent": "AutoSellBot/1.0" },
-    })
-      .then((r) => (r.ok ? "DEXSCREENER_OK" : "DEXSCREENER_FAIL"))
-      .catch(() => "DEXSCREENER_FAIL"),
-  )
+  while (Date.now() < endTime && autoSellState.isRunning) {
+    try {
+      await monitorMarketActivity()
 
-  // Test RPC connection
-  testPromises.push(
-    (async () => {
-      try {
-        const { Connection } = await import("@solana/web3.js")
-        const connection = new Connection(
-          process.env.NEXT_PUBLIC_RPC_URL ||
-            process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
-            "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
-          { commitment: "confirmed" },
-        )
-        await connection.getLatestBlockhash()
-        return "RPC_OK"
-      } catch {
-        return "RPC_FAIL"
+      const remainingSeconds = Math.ceil((endTime - Date.now()) / 1000)
+      if (remainingSeconds > 0) {
+        console.log(`[DATA COLLECTION] ${remainingSeconds}s remaining in analysis window...`)
+        await new Promise((resolve) => setTimeout(resolve, Math.min(collectInterval, endTime - Date.now())))
       }
-    })(),
+    } catch (error) {
+      console.error("Error during data collection:", error)
+      await new Promise((resolve) => setTimeout(resolve, 5000)) // Wait 5s before retry
+    }
+  }
+
+  console.log(`[DATA COLLECTION] 2-minute data collection completed`)
+}
+
+async function analyzeAndExecuteSell() {
+  const netUsdFlow = autoSellState.metrics.netUsdFlow
+  const minNetFlowUsd = autoSellState.config.minNetFlowUsd
+
+  console.log(
+    `[ANALYSIS] 2-Minute Window Results:`,
+    `Buy Volume: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)}`,
+    `Sell Volume: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)}`,
+    `Net Flow: $${netUsdFlow.toFixed(2)}`,
+    `Threshold: $${minNetFlowUsd}`,
   )
 
-  const results = await Promise.allSettled(testPromises)
-  const testResults = results.map((r) => (r.status === "fulfilled" ? r.value : "FAILED"))
-
-  console.log("[CONNECTIVITY]", testResults.join(", "))
-
-  return testResults
+  if (netUsdFlow > minNetFlowUsd) {
+    console.log(`[TRIGGER] ✅ Net flow $${netUsdFlow.toFixed(2)} > threshold $${minNetFlowUsd} - EXECUTING SELL`)
+    await executeAutoSell()
+    autoSellState.metrics.lastSellTrigger = Date.now()
+  } else {
+    console.log(`[NO TRIGGER] ❌ Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd} - No sell executed`)
+  }
 }
 
 async function monitorMarketActivity() {
@@ -481,7 +462,7 @@ async function monitorMarketActivity() {
           timestamp: currentTime,
           buyVolumeUsd: realBuyVolumeUsd,
           sellVolumeUsd: realSellVolumeUsd,
-          priceUsd: currentPriceUsd,
+          priceUsd: autoSellState.metrics.currentPriceUsd,
         }
 
         autoSellState.marketTrades.push(tradeData)
@@ -501,7 +482,7 @@ async function monitorMarketActivity() {
       }
 
       console.log(
-        `[MARKET MONITOR] Price: $${currentPriceUsd.toFixed(6)} | Window Buy: $${buyVolumeUsd.toFixed(2)} | Window Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)} | Trades: ${autoSellState.marketTrades.length}`,
+        `[MARKET MONITOR] Price: $${autoSellState.metrics.currentPriceUsd.toFixed(6)} | Window Buy: $${buyVolumeUsd.toFixed(2)} | Window Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)} | Trades: ${autoSellState.marketTrades.length}`,
       )
     } catch (dexError: any) {
       clearTimeout(dexTimeout)
@@ -537,49 +518,7 @@ async function stopAutoSellEngine() {
 }
 
 async function checkAndExecuteAutoSell() {
-  try {
-    const currentTime = Date.now()
-    const windowDurationMs = autoSellState.config.timeWindowSeconds * 1000
-    const timeSinceWindowStart = currentTime - autoSellState.metrics.analysisWindowStart
-
-    if (timeSinceWindowStart < windowDurationMs) {
-      const remainingSeconds = Math.ceil((windowDurationMs - timeSinceWindowStart) / 1000)
-      console.log(`[WINDOW] Analysis window in progress... ${remainingSeconds}s remaining`)
-      return
-    }
-
-    if (!autoSellState.metrics.windowCompleted) {
-      autoSellState.metrics.windowCompleted = true
-      console.log(`[WINDOW] Analysis window completed! Analyzing ${autoSellState.config.timeWindowSeconds}s of data...`)
-
-      const netUsdFlow = autoSellState.metrics.netUsdFlow
-      const minNetFlowUsd = autoSellState.config.minNetFlowUsd
-
-      console.log(
-        `[ANALYSIS] Window Results: Buy Volume: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell Volume: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)}`,
-      )
-
-      if (netUsdFlow > minNetFlowUsd) {
-        console.log(
-          `[TRIGGER] Positive net flow $${netUsdFlow.toFixed(2)} > threshold $${minNetFlowUsd} - EXECUTING SELL`,
-        )
-        await executeAutoSell()
-      } else {
-        console.log(`[NO TRIGGER] Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd} - No sell executed`)
-      }
-
-      console.log(`[WINDOW] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
-      autoSellState.metrics.analysisWindowStart = currentTime
-      autoSellState.metrics.windowCompleted = false
-      autoSellState.marketTrades = []
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
-    }
-  } catch (error: any) {
-    console.error("Window check error:", error)
-    throw error
-  }
+  // This function is no longer needed with the new analysis cycle
 }
 
 async function executeAutoSell() {
@@ -690,7 +629,6 @@ async function executeAutoSell() {
       }
     })
 
-    autoSellState.metrics.lastSellTrigger = Date.now()
     autoSellState.metrics.totalSold += totalTokensSold
 
     console.log(`[AUTO-SELL] SUMMARY: ${successfulSells}/${sellPromises.length} wallets sold successfully`)
@@ -715,7 +653,7 @@ async function updateAllWalletBalances() {
   for (const batch of walletBatches) {
     const balancePromises = batch.map((wallet) =>
       updateWalletBalances(wallet).catch((error) => {
-        console.error(`Error updating balance for ${wallet.name}:`, error)
+        console.error(`Error updating balance for ${wallet.name}:`, error.message)
         return null
       }),
     )
@@ -744,30 +682,39 @@ async function updateWalletBalances(wallet: any) {
       { commitment: "confirmed" },
     )
 
-    const balanceController = new AbortController()
-    const balanceTimeout = setTimeout(() => balanceController.abort(), 10000)
+    const solBalancePromise = connection.getBalance(wallet.keypair.publicKey)
+    const solBalance = await Promise.race([
+      solBalancePromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("SOL balance timeout")), 8000)),
+    ])
+
+    wallet.balance = Number(solBalance) / 1e9
+    console.log(`[BALANCE UPDATE] ${wallet.name} SOL: ${wallet.balance.toFixed(4)}`)
 
     try {
-      const solBalance = await connection.getBalance(wallet.keypair.publicKey)
-      wallet.balance = solBalance / 1e9
+      const mintPubkey = new PublicKey(autoSellState.config.mint)
+      const ata = await getAssociatedTokenAddress(mintPubkey, wallet.keypair.publicKey)
 
-      try {
-        const mintPubkey = new PublicKey(autoSellState.config.mint)
-        const ata = await getAssociatedTokenAddress(mintPubkey, wallet.keypair.publicKey)
-        const tokenAccount = await connection.getTokenAccountBalance(ata)
-        wallet.tokenBalance = tokenAccount.value?.uiAmount || 0
-      } catch (tokenError) {
+      const tokenBalancePromise = connection.getTokenAccountBalance(ata)
+      const tokenAccount = await Promise.race([
+        tokenBalancePromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Token balance timeout")), 8000)),
+      ])
+
+      wallet.tokenBalance = Number(tokenAccount.value?.uiAmount) || 0
+      console.log(`[BALANCE UPDATE] ${wallet.name} Token: ${wallet.tokenBalance.toFixed(6)}`)
+    } catch (tokenError: any) {
+      if (tokenError.message?.includes("could not find account") || tokenError.message?.includes("Invalid param")) {
+        console.log(`[BALANCE UPDATE] ${wallet.name} Token: 0 (no token account)`)
+        wallet.tokenBalance = 0
+      } else {
+        console.warn(`[BALANCE UPDATE] ${wallet.name} Token balance error:`, tokenError.message)
         wallet.tokenBalance = 0
       }
-
-      clearTimeout(balanceTimeout)
-    } catch (rpcError: any) {
-      clearTimeout(balanceTimeout)
-      throw new Error(`RPC error: ${rpcError?.message || "Unknown RPC error"}`)
     }
   } catch (error: any) {
-    console.error("Error updating wallet balances:", error)
-    throw error
+    console.error(`[BALANCE ERROR] ${wallet.name}:`, error.message)
+    // Don't throw, just log the error and continue
   }
 }
 
