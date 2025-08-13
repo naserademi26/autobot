@@ -6,7 +6,7 @@ primary_region = "iad"
 [env]
   NODE_ENV = "production"
   PORT = "3000"
-  NODE_OPTIONS = "--max-old-space-size=2048 --unhandled-rejections=warn --max-http-header-size=32768"
+  NODE_OPTIONS = "--max-old-space-size=4096 --unhandled-rejections=warn --max-http-header-size=32768"
   NEXT_TELEMETRY_DISABLED = "1"
   FORCE_COLOR = "0"
   NODE_NO_WARNINGS = "1"
@@ -17,7 +17,7 @@ primary_region = "iad"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  max_machines_running = 1
+  max_machines_running = 2
 
 [[http_service.checks]]
   interval = "60s"
@@ -35,9 +35,5 @@ primary_region = "iad"
 [deploy]
   release_command = "echo 'Deployment complete'"
 
-[processes]
-  app = "npm start"
-
-[kill_signal]
-  signal = "SIGTERM"
-  timeout = "30s"
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
