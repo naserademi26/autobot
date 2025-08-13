@@ -6,18 +6,20 @@ const autoSellState = {
   isRunning: false,
   config: null as any,
   wallets: [] as any[],
-  marketTrades: [] as any[], // Store real market trades from Bitquery
-  bitquerySubscription: null as any, // WebSocket subscription
+  marketTrades: [] as any[],
+  bitquerySubscription: null as any,
+  botStartTime: 0, // Track when bot actually started
+  firstAnalysisTime: 0, // Track when first analysis should happen
   metrics: {
     totalBought: 0,
     totalSold: 0,
     currentPrice: 0,
     currentPriceUsd: 0,
     solPriceUsd: 100,
-    netUsdFlow: 0, // Net USD flow (buyers - sellers) in time window
-    buyVolumeUsd: 0, // Total buy volume in USD in time window
-    sellVolumeUsd: 0, // Total sell volume in USD in time window
-    lastSellTrigger: 0, // Timestamp of last sell trigger
+    netUsdFlow: 0,
+    buyVolumeUsd: 0,
+    sellVolumeUsd: 0,
+    lastSellTrigger: 0,
   },
   intervals: [] as NodeJS.Timeout[],
 }
@@ -112,6 +114,13 @@ async function startAutoSellEngine() {
   autoSellState.intervals.forEach((interval) => clearInterval(interval))
   autoSellState.intervals = []
 
+  autoSellState.botStartTime = Date.now()
+  autoSellState.firstAnalysisTime = autoSellState.botStartTime + 2 * 60 * 1000 // 2 minutes from now
+
+  console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
+  console.log(`[AUTO-SELL] First analysis will begin at ${new Date(autoSellState.firstAnalysisTime).toISOString()}`)
+  console.log("[AUTO-SELL] Waiting 2 minutes before starting market analysis...")
+
   await start2MinuteAnalysisCycle()
 
   const balanceInterval = setInterval(async () => {
@@ -122,42 +131,48 @@ async function startAutoSellEngine() {
     } catch (error) {
       console.error("Balance update error:", error)
     }
-  }, 30000) // Update every 30 seconds
+  }, 30000)
 
   autoSellState.intervals.push(balanceInterval)
 }
 
 function start2MinuteAnalysisCycle() {
-  // Get SOL price first
   updateSolPrice()
 
-  console.log("[AUTO-SELL] Starting 2-minute analysis cycles...")
+  console.log("[AUTO-SELL] Setting up 2-minute analysis cycles...")
 
-  // Run analysis every 2 minutes (120 seconds)
-  const analysisInterval = setInterval(async () => {
-    if (!autoSellState.isRunning) {
-      clearInterval(analysisInterval)
-      return
-    }
+  const timeUntilFirstAnalysis = autoSellState.firstAnalysisTime - Date.now()
 
-    try {
-      console.log("[AUTO-SELL] Starting 2-minute market analysis...")
+  setTimeout(
+    () => {
+      if (!autoSellState.isRunning) return
 
-      // Collect market data for the past 2 minutes
-      await collectMarketDataFor2Minutes()
+      console.log("[AUTO-SELL] 2-minute wait complete. Starting market analysis...")
 
-      // Analyze and execute if conditions are met
-      await analyzeAndExecuteAutoSell()
-    } catch (error) {
-      console.error("[AUTO-SELL] 2-minute analysis error:", error)
-    }
-  }, 120000) // 2 minutes = 120,000ms
+      // Run first analysis
+      collectMarketDataFor2Minutes()
+      analyzeAndExecuteAutoSell()
 
-  autoSellState.intervals.push(analysisInterval)
+      // Then run every 2 minutes
+      const analysisInterval = setInterval(async () => {
+        if (!autoSellState.isRunning) {
+          clearInterval(analysisInterval)
+          return
+        }
 
-  // Run first analysis immediately
-  collectMarketDataFor2Minutes()
-  analyzeAndExecuteAutoSell()
+        try {
+          console.log("[AUTO-SELL] Starting 2-minute market analysis...")
+          await collectMarketDataFor2Minutes()
+          await analyzeAndExecuteAutoSell()
+        } catch (error) {
+          console.error("[AUTO-SELL] 2-minute analysis error:", error)
+        }
+      }, 120000) // 2 minutes
+
+      autoSellState.intervals.push(analysisInterval)
+    },
+    Math.max(0, timeUntilFirstAnalysis),
+  )
 }
 
 async function collectMarketDataFor2Minutes() {
@@ -188,11 +203,20 @@ async function collectMarketDataFor2Minutes() {
 }
 
 async function collectBitqueryPrimaryData(apiKey: string) {
+  const botStartTimeISO = new Date(autoSellState.botStartTime).toISOString()
+  const currentTimeISO = new Date().toISOString()
+
+  console.log(`[BITQUERY] Analyzing transactions from ${botStartTimeISO} to ${currentTimeISO}`)
+
   const query = {
     query: `{
       Solana(dataset: realtime) {
         DEXTradeByTokens(
-          where: {Block: {Time: {since_relative: {minutes_ago: 2}}}, Trade: {Currency: {MintAddress: {is: "${autoSellState.config.mint}"}}}, Transaction: {Result: {Success: true}}}
+          where: {
+            Block: {Time: {since: "${botStartTimeISO}", till: "${currentTimeISO}"}}, 
+            Trade: {Currency: {MintAddress: {is: "${autoSellState.config.mint}"}}}, 
+            Transaction: {Result: {Success: true}}
+          }
         ) {
           Trade {
             Currency {
@@ -307,7 +331,7 @@ function processBitqueryRealTimeData(tradeData: any[]) {
 
 async function collectDexScreenerData() {
   try {
-    console.log("[DEXSCREENER] Collecting reliable market data for 2-minute analysis")
+    console.log("[DEXSCREENER] Using conservative fallback (no real-time individual trades available)")
 
     const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
     const data = await response.json()
@@ -315,29 +339,42 @@ async function collectDexScreenerData() {
     if (data.pairs && data.pairs.length > 0) {
       const pair = data.pairs[0]
       const priceUsd = Number(pair.priceUsd || 0)
-      const volume5m = Number(pair.volume?.m5 || 0)
-      const priceChange5m = Number(pair.priceChange?.m5 || 0)
+      const volume1h = Number(pair.volume?.h1 || 0)
+      const priceChange1h = Number(pair.priceChange?.h1 || 0)
 
       if (priceUsd > 0) {
-        const buyRatio =
-          priceChange5m >= 0
-            ? Math.min(0.75, 0.5 + priceChange5m / 50) // Positive price change = more buying
-            : Math.max(0.25, 0.5 + priceChange5m / 50) // Negative price change = more selling
+        // Very conservative estimation - only show activity if there's significant price movement
+        const significantPriceChange = Math.abs(priceChange1h) > 5 // 5% change minimum
 
-        // Scale 5-minute volume to 2-minute estimate
-        const scaleFactor = 0.4 // 2 minutes / 5 minutes
-        const estimatedBuyVolume = volume5m * buyRatio * scaleFactor
-        const estimatedSellVolume = volume5m * (1 - buyRatio) * scaleFactor
+        if (significantPriceChange) {
+          // Conservative 2-minute volume estimate (much smaller than before)
+          const conservativeVolume = volume1h * 0.03 // 2 minutes out of 60 minutes = 3.3%, use 3% to be conservative
 
-        autoSellState.metrics.currentPriceUsd = priceUsd
-        autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
-        autoSellState.metrics.buyVolumeUsd = estimatedBuyVolume
-        autoSellState.metrics.sellVolumeUsd = estimatedSellVolume
-        autoSellState.metrics.netUsdFlow = estimatedBuyVolume - estimatedSellVolume
+          const buyRatio = priceChange1h > 0 ? 0.6 : 0.4 // Slight bias based on price direction
+          const estimatedBuyVolume = conservativeVolume * buyRatio
+          const estimatedSellVolume = conservativeVolume * (1 - buyRatio)
 
-        console.log(
-          `[DEXSCREENER] 2-min analysis - Price: $${priceUsd.toFixed(8)} | Buy: $${estimatedBuyVolume.toFixed(2)} | Sell: $${estimatedSellVolume.toFixed(2)} | Net: $${(estimatedBuyVolume - estimatedSellVolume).toFixed(2)} | Price Change 5m: ${priceChange5m.toFixed(2)}%`,
-        )
+          autoSellState.metrics.currentPriceUsd = priceUsd
+          autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
+          autoSellState.metrics.buyVolumeUsd = estimatedBuyVolume
+          autoSellState.metrics.sellVolumeUsd = estimatedSellVolume
+          autoSellState.metrics.netUsdFlow = estimatedBuyVolume - estimatedSellVolume
+
+          console.log(
+            `[DEXSCREENER] Conservative estimate - Price: $${priceUsd.toFixed(8)} | Buy: $${estimatedBuyVolume.toFixed(2)} | Sell: $${estimatedSellVolume.toFixed(2)} | Net: $${(estimatedBuyVolume - estimatedSellVolume).toFixed(2)} | 1h Change: ${priceChange1h.toFixed(2)}%`,
+          )
+        } else {
+          // No significant activity detected
+          autoSellState.metrics.currentPriceUsd = priceUsd
+          autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
+          autoSellState.metrics.buyVolumeUsd = 0
+          autoSellState.metrics.sellVolumeUsd = 0
+          autoSellState.metrics.netUsdFlow = 0
+
+          console.log(
+            `[DEXSCREENER] No significant activity detected (1h change: ${priceChange1h.toFixed(2)}%) - Price: $${priceUsd.toFixed(8)}`,
+          )
+        }
       } else {
         console.log("[DEXSCREENER] No valid price data available")
       }
