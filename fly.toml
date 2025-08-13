@@ -15,44 +15,19 @@ primary_region = "iad"
   auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
 
 [[http_service.checks]]
-  interval = "10s"
-  timeout = "5s"
-  grace_period = "10s"
+  interval = "15s"
+  timeout = "10s"
+  grace_period = "15s"
   method = "GET"
   path = "/api/health"
   headers = { "User-Agent" = "fly-health-check" }
 
-[machine]
+[[vm]]
   memory = "1gb"
   cpu_kind = "shared"
   cpus = 1
 
-[[services]]
-  protocol = "tcp"
-  internal_port = 3000
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-    force_https = true
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
 [deploy]
   release_command = "echo 'Deployment complete'"
-
-[restart]
-  policy = "on-failure"
-  max_restarts = 3
-  restart_delay = "5s"
-
-[processes]
-  app = "node server.js"
-
-[logging]
-  level = "info"
