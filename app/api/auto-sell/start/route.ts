@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-// Global state for the auto-sell engine
+// Global state for the auto-sell engine with enhanced tracking
 const autoSellState = {
   isRunning: false,
   config: null as any,
@@ -20,9 +20,22 @@ const autoSellState = {
     windowCompleted: false, // Whether current window is complete and ready for analysis
   },
   intervals: [] as NodeJS.Timeout[],
+  intervalIds: new Set<NodeJS.Timeout>(), // Track interval IDs for cleanup
   lastError: null as string | null,
   errorCount: 0,
+  startTime: 0, // Track when engine started
+  maxRunTimeMs: 24 * 60 * 60 * 1000, // 24 hours max runtime
 }
+
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception:", error)
+  // Don't exit, just log the error
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason)
+  // Don't exit, just log the error
+})
 
 export async function POST(request: NextRequest) {
   try {
@@ -61,7 +74,9 @@ export async function POST(request: NextRequest) {
     const wallets = []
     const walletErrors = []
 
-    for (let i = 0; i < privateKeys.length; i++) {
+    const maxWallets = Math.min(privateKeys.length, 20) // Limit to 20 wallets max
+
+    for (let i = 0; i < maxWallets; i++) {
       try {
         const privateKey = privateKeys[i]
 
@@ -123,6 +138,7 @@ export async function POST(request: NextRequest) {
 
     autoSellState.lastError = null
     autoSellState.errorCount = 0
+    autoSellState.startTime = Date.now()
 
     // Update global state
     autoSellState.config = validatedConfig
@@ -165,23 +181,29 @@ export async function POST(request: NextRequest) {
 }
 
 async function startAutoSellEngine() {
-  // Clear any existing intervals
   autoSellState.intervals.forEach((interval) => {
     try {
       clearInterval(interval)
+      autoSellState.intervalIds.delete(interval)
     } catch (e) {
       console.warn("Error clearing interval:", e)
     }
   })
   autoSellState.intervals = []
+  autoSellState.intervalIds.clear()
 
   autoSellState.metrics.analysisWindowStart = Date.now()
   autoSellState.metrics.windowCompleted = false
   console.log(`[ENGINE] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
 
-  // Market monitoring interval (every 10 seconds)
   const marketMonitorInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
+
+    if (Date.now() - autoSellState.startTime > autoSellState.maxRunTimeMs) {
+      console.log("[ENGINE] Max runtime reached, shutting down")
+      await stopAutoSellEngine()
+      return
+    }
 
     try {
       await monitorMarketActivity()
@@ -217,7 +239,6 @@ async function startAutoSellEngine() {
     }
   }, 30000) // Check every 30 seconds instead of 15
 
-  // Wallet balance update interval (every 30 seconds)
   const balanceInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
 
@@ -226,21 +247,31 @@ async function startAutoSellEngine() {
     } catch (error: any) {
       console.error("Balance update error:", error)
     }
-  }, 30000)
+  }, 60000) // Reduced to every 60 seconds to save resources
 
   autoSellState.intervals.push(marketMonitorInterval, executionInterval, balanceInterval)
+  autoSellState.intervalIds.add(marketMonitorInterval)
+  autoSellState.intervalIds.add(executionInterval)
+  autoSellState.intervalIds.add(balanceInterval)
 }
 
 async function stopAutoSellEngine() {
+  console.log("[ENGINE] Stopping auto-sell engine...")
   autoSellState.isRunning = false
+
   autoSellState.intervals.forEach((interval) => {
     try {
       clearInterval(interval)
+      autoSellState.intervalIds.delete(interval)
     } catch (e) {
       console.warn("Error clearing interval:", e)
     }
   })
   autoSellState.intervals = []
+  autoSellState.intervalIds.clear()
+
+  autoSellState.marketTrades = []
+  console.log("[ENGINE] Auto-sell engine stopped and cleaned up")
 }
 
 async function monitorMarketActivity() {
@@ -268,6 +299,7 @@ async function monitorMarketActivity() {
         }
       }
     } catch (solPriceError) {
+      clearTimeout(solPriceTimeout)
       console.warn("Failed to fetch SOL price, using previous value:", solPriceError)
     }
 
@@ -323,16 +355,14 @@ async function monitorMarketActivity() {
       // Get recent transactions from the pair with validation
       const volume24h = Math.max(0, Number(pair.volume?.h24 || 0))
       const priceChange24h = Number(pair.priceChange?.h24 || 0)
-      const txns24h = pair.txns?.h24 || { buys: 0, sells: 0 }
 
       // Estimate recent buy/sell activity based on volume and price movement
       const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
       const currentTime = Date.now()
 
-      // Clean old trades outside time window
-      autoSellState.marketTrades = autoSellState.marketTrades.filter(
-        (trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs,
-      )
+      autoSellState.marketTrades = autoSellState.marketTrades
+        .filter((trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs)
+        .slice(-100) // Keep only last 100 trades max
 
       // Estimate current market momentum based on price change and volume
       const volumeInWindow = Math.max(0, (volume24h / 24 / 60) * (autoSellState.config.timeWindowSeconds / 60))
@@ -474,10 +504,12 @@ async function executeAutoSell() {
       return
     }
 
+    const maxConcurrentSells = Math.min(walletsWithTokens.length, 5) // Max 5 concurrent sells
     const sellPromises = []
     let totalTokensToSell = 0
 
-    for (const wallet of walletsWithTokens) {
+    for (let i = 0; i < maxConcurrentSells; i++) {
+      const wallet = walletsWithTokens[i]
       // Calculate proportional amount for this wallet
       const walletProportion = wallet.tokenBalance / totalTokensHeld
       const walletTokensToSell = exactTokensToSell * walletProportion
@@ -554,14 +586,29 @@ async function executeAutoSell() {
 }
 
 async function updateAllWalletBalances() {
-  const balancePromises = autoSellState.wallets.map((wallet) =>
-    updateWalletBalances(wallet).catch((error) => {
-      console.error(`Error updating balance for ${wallet.name}:`, error)
-      return null
-    }),
-  )
+  // Process wallets in batches to prevent overwhelming RPC
+  const batchSize = 3
+  const walletBatches = []
 
-  await Promise.allSettled(balancePromises)
+  for (let i = 0; i < autoSellState.wallets.length; i += batchSize) {
+    walletBatches.push(autoSellState.wallets.slice(i, i + batchSize))
+  }
+
+  for (const batch of walletBatches) {
+    const balancePromises = batch.map((wallet) =>
+      updateWalletBalances(wallet).catch((error) => {
+        console.error(`Error updating balance for ${wallet.name}:`, error)
+        return null
+      }),
+    )
+
+    await Promise.allSettled(balancePromises)
+
+    // Small delay between batches to prevent rate limiting
+    if (walletBatches.length > 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  }
 }
 
 async function updateWalletBalances(wallet: any) {

@@ -10,15 +10,39 @@ export async function POST() {
     // Stop the engine
     autoSellState.isRunning = false
 
-    // Clear all intervals
-    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals.forEach((interval) => {
+      try {
+        clearInterval(interval)
+        autoSellState.intervalIds?.delete(interval)
+      } catch (e) {
+        console.warn("Error clearing interval:", e)
+      }
+    })
     autoSellState.intervals = []
+    if (autoSellState.intervalIds) {
+      autoSellState.intervalIds.clear()
+    }
 
-    // Reset state
     autoSellState.config = null
     autoSellState.wallets = []
-    autoSellState.buyTransactions = []
-    autoSellState.metrics = { totalBought: 0, totalSold: 0, avgBuyPrice: 0, currentPrice: 0, unrealizedPnL: 0 }
+    autoSellState.marketTrades = [] // Fixed: use marketTrades instead of buyTransactions
+    autoSellState.metrics = {
+      totalBought: 0,
+      totalSold: 0,
+      currentPrice: 0,
+      currentPriceUsd: 0,
+      solPriceUsd: 100,
+      netUsdFlow: 0,
+      buyVolumeUsd: 0,
+      sellVolumeUsd: 0,
+      lastSellTrigger: 0,
+      analysisWindowStart: 0,
+      windowCompleted: false,
+    }
+    autoSellState.lastError = null
+    autoSellState.errorCount = 0
+
+    console.log("[ENGINE] Auto-sell engine stopped and state reset")
 
     return NextResponse.json({
       success: true,
