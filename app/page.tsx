@@ -105,10 +105,10 @@ export default function AutoSellDashboard() {
 
   const [config, setConfig] = useState<AutoSellConfig>({
     mint: "",
-    timeWindowSeconds: 120, // 2 minutes time window
+    timeWindowSeconds: 30, // Reduced to 30 seconds for faster reaction
     sellPercentageOfNetFlow: 25, // Sell 25% of net USD flow
-    minNetFlowUsd: 10, // Minimum $10 net flow to trigger
-    cooldownSeconds: 30,
+    minNetFlowUsd: 0, // Set to 0 to trigger on any positive net flow
+    cooldownSeconds: 15, // Reduced cooldown for faster execution
     slippageBps: 300,
   })
 
@@ -330,24 +330,30 @@ export default function AutoSellDashboard() {
     status.metrics.lastSellTrigger > 0 ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000) : 0
 
   return (
-    <div className="max-w-7xl mx-auto p-6 space-y-6">
-      <header className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+    <div className="max-w-7xl mx-auto p-6 space-y-6 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 min-h-screen">
+      <header className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between p-6 rounded-2xl bg-gradient-to-r from-slate-900/80 to-slate-800/80 backdrop-blur-sm border border-slate-700/50">
         <div>
-          <h1 className="text-3xl font-bold gradient-text">🤖 Market Momentum Auto-Sell</h1>
-          <p className="text-slate-400 text-sm">
-            Monitors market buy/sell activity and sells {config.sellPercentageOfNetFlow}% of net positive USD flow
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-emerald-400 via-blue-400 to-purple-400 bg-clip-text text-transparent">
+            🤖 Market Momentum Auto-Sell
+          </h1>
+          <p className="text-slate-300 text-sm mt-2 font-medium">
+            Monitors market buy/sell activity and sells 25% of net positive USD flow
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm">
+        <div className="flex items-center gap-4">
+          <div className="rounded-xl border border-slate-700/50 bg-slate-800/60 backdrop-blur-sm px-4 py-2.5 text-sm font-medium">
             <span className="text-slate-400">RPC: </span>
-            <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-slate-400"}>
+            <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-amber-400"}>
               {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
             </span>
           </div>
           <Badge
             variant={status.isRunning ? "default" : "secondary"}
-            className={status.isRunning ? "bg-green-600 animate-pulse" : "bg-gray-600"}
+            className={`px-4 py-2 text-sm font-semibold ${
+              status.isRunning
+                ? "bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse"
+                : "bg-slate-600/20 text-slate-400 border-slate-500/50"
+            }`}
           >
             {status.isRunning ? "🟢 MONITORING" : "🔴 STOPPED"}
           </Badge>
@@ -358,60 +364,81 @@ export default function AutoSellDashboard() {
         {/* Configuration Panel */}
         <div className="lg:col-span-1 space-y-6">
           {/* Wallet Management */}
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Wallet className="w-5 h-5" />
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-blue-500/20">
+                  <Wallet className="w-5 h-5 text-blue-400" />
+                </div>
                 Wallet Configuration
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <textarea
-                className="input min-h-[120px] font-mono text-xs"
-                placeholder="One base58 or JSON secret array per line"
+                className="w-full min-h-[120px] font-mono text-xs bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all"
+                placeholder="Enter wallet private keys (one per line)&#10;Supports base58 or JSON array format&#10;Example: 5Kb8kLf9CJfPg..."
                 value={vaultKeys}
                 onChange={(e) => setVaultKeys(e.target.value)}
               />
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" onClick={addVault}>
+                <Button size="sm" onClick={addVault} className="bg-blue-600 hover:bg-blue-700 text-white font-medium">
                   Add Wallets
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => setConnected([])}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setConnected([])}
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800"
+                >
                   Clear
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => toggleAll(true)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => toggleAll(true)}
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800"
+                >
                   Select All
                 </Button>
-                <Button size="sm" variant="outline" onClick={refreshBalances} disabled={balancesLoading}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={refreshBalances}
+                  disabled={balancesLoading}
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800 bg-transparent"
+                >
                   <RefreshCw className={`w-4 h-4 ${balancesLoading ? "animate-spin" : ""}`} />
                 </Button>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div className="bg-slate-800/50 p-3 rounded-lg text-center">
-                  <div className="text-xl font-bold text-blue-400">{connected.length}</div>
-                  <div className="text-slate-400">Wallets</div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border border-blue-500/20 p-4 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-blue-400">{connected.length}</div>
+                  <div className="text-slate-400 text-sm font-medium">Wallets</div>
                 </div>
-                <div className="bg-slate-800/50 p-3 rounded-lg text-center">
-                  <div className="text-xl font-bold text-green-400">{selectedCount}</div>
-                  <div className="text-slate-400">Selected</div>
+                <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border border-emerald-500/20 p-4 rounded-xl text-center">
+                  <div className="text-2xl font-bold text-emerald-400">{selectedCount}</div>
+                  <div className="text-slate-400 text-sm font-medium">Selected</div>
                 </div>
               </div>
 
               {connected.length > 0 && (
-                <div className="max-h-40 overflow-auto border border-slate-700 rounded-lg p-2">
+                <div className="max-h-48 overflow-auto border border-slate-700/50 rounded-xl p-3 bg-slate-800/30 space-y-2">
                   {connected.map((w) => (
-                    <div key={w.pubkey} className="flex items-center gap-2 py-1">
+                    <div
+                      key={w.pubkey}
+                      className="flex items-center gap-3 py-2 px-3 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 transition-colors"
+                    >
                       <input
                         type="checkbox"
                         checked={!!selected[w.pubkey]}
                         onChange={(e) => setSelected({ ...selected, [w.pubkey]: e.target.checked })}
-                        className="rounded"
+                        className="rounded border-slate-600 bg-slate-700 text-blue-500 focus:ring-blue-500/50"
                       />
-                      <span className="font-mono text-xs text-slate-300">
+                      <span className="font-mono text-xs text-slate-300 flex-1">
                         {w.pubkey.slice(0, 6)}...{w.pubkey.slice(-4)}
                       </span>
-                      <span className="text-xs text-slate-400 ml-auto">
+                      <span className="text-xs text-slate-400 font-medium">
                         {balances[w.pubkey]?.toFixed(3) || "0.000"} SOL
                       </span>
                     </div>
@@ -422,45 +449,48 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* Token Configuration */}
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Target className="w-5 h-5" />
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-purple-500/20">
+                  <Target className="w-5 h-5 text-purple-400" />
+                </div>
                 Market Momentum Settings
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <Label>Token Mint Address</Label>
+                <Label className="text-slate-300 font-medium">Token Mint Address</Label>
                 <Input
                   placeholder="Paste mint address or pump.fun URL"
                   value={mintRaw}
                   onChange={(e) => setMintRaw(e.target.value)}
-                  className="font-mono text-sm"
+                  className="font-mono text-sm bg-slate-800/60 border-slate-700/50 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
                 />
                 {token.name && (
-                  <p className="text-sm text-green-400 mt-1">
+                  <p className="text-sm text-emerald-400 mt-2 font-medium">
                     ✅ {token.name} ({token.symbol}) via {token.source}
                   </p>
                 )}
               </div>
 
-              <Separator />
+              <Separator className="bg-slate-700/50" />
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label>Time Window (sec)</Label>
+                  <Label className="text-slate-300 font-medium">Time Window (sec)</Label>
                   <Input
                     type="number"
-                    min="60"
-                    max="600"
+                    min="15"
+                    max="300"
                     value={config.timeWindowSeconds}
                     onChange={(e) => setConfig((prev) => ({ ...prev, timeWindowSeconds: Number(e.target.value) }))}
+                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
                   />
-                  <p className="text-xs text-slate-400 mt-1">Track buy/sell activity</p>
+                  <p className="text-xs text-slate-500 mt-1">Track buy/sell activity</p>
                 </div>
                 <div>
-                  <Label>Sell % of Net Flow</Label>
+                  <Label className="text-slate-300 font-medium">Sell % of Net Flow</Label>
                   <Input
                     type="number"
                     min="1"
@@ -469,49 +499,43 @@ export default function AutoSellDashboard() {
                     onChange={(e) =>
                       setConfig((prev) => ({ ...prev, sellPercentageOfNetFlow: Number(e.target.value) }))
                     }
+                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
                   />
-                  <p className="text-xs text-slate-400 mt-1">% of net USD flow</p>
+                  <p className="text-xs text-slate-500 mt-1">% of net USD flow</p>
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <Label>Min Net Flow ($)</Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    value={config.minNetFlowUsd}
-                    onChange={(e) => setConfig((prev) => ({ ...prev, minNetFlowUsd: Number(e.target.value) }))}
-                  />
-                  <p className="text-xs text-slate-400 mt-1">Minimum trigger amount</p>
-                </div>
-                <div>
-                  <Label>Cooldown (sec)</Label>
+                  <Label className="text-slate-300 font-medium">Cooldown (sec)</Label>
                   <Input
                     type="number"
                     value={config.cooldownSeconds}
                     onChange={(e) => setConfig((prev) => ({ ...prev, cooldownSeconds: Number(e.target.value) }))}
+                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
                   />
                 </div>
-              </div>
-
-              <div>
-                <Label>Slippage (bps)</Label>
-                <Input
-                  type="number"
-                  value={config.slippageBps}
-                  onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
-                />
-                <p className="text-xs text-slate-400 mt-1">300 bps = 3%</p>
+                <div>
+                  <Label className="text-slate-300 font-medium">Slippage (bps)</Label>
+                  <Input
+                    type="number"
+                    value={config.slippageBps}
+                    onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
+                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                  />
+                  <p className="text-xs text-slate-500 mt-1">300 bps = 3%</p>
+                </div>
               </div>
             </CardContent>
           </Card>
 
           {/* Control Panel */}
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Settings className="w-5 h-5" />
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-amber-500/20">
+                  <Settings className="w-5 h-5 text-amber-400" />
+                </div>
                 Engine Control
               </CardTitle>
             </CardHeader>
@@ -520,24 +544,39 @@ export default function AutoSellDashboard() {
                 <Button
                   onClick={startAutoSell}
                   disabled={loading || status.isRunning || !mint || selectedCount === 0}
-                  className="bg-green-600 hover:bg-green-700"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 shadow-lg hover:shadow-emerald-500/25 transition-all"
                 >
                   {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                   Start
                 </Button>
-                <Button onClick={stopAutoSell} disabled={loading || !status.isRunning} variant="destructive">
+                <Button
+                  onClick={stopAutoSell}
+                  disabled={loading || !status.isRunning}
+                  variant="destructive"
+                  className="bg-rose-600 hover:bg-rose-700 text-white font-semibold py-3 shadow-lg hover:shadow-rose-500/25 transition-all"
+                >
                   {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Pause className="w-4 h-4" />}
                   Stop
                 </Button>
               </div>
 
               {status.config && (
-                <div className="text-xs text-slate-400 space-y-1">
-                  <div>Window: {status.config.timeWindowSeconds}s</div>
-                  <div>Sell: {status.config.sellPercentageOfNetFlow}% of net flow</div>
-                  <div>Min Trigger: ${status.config.minNetFlowUsd}</div>
-                  <div>Cooldown: {status.config.cooldownSeconds}s</div>
-                  <div className="text-yellow-400">Sells tokens for SOL based on market momentum</div>
+                <div className="text-xs text-slate-400 space-y-2 p-3 bg-slate-800/30 rounded-lg border border-slate-700/30">
+                  <div className="flex justify-between">
+                    <span>Window:</span>
+                    <span className="text-slate-300">{status.config.timeWindowSeconds}s</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Sell:</span>
+                    <span className="text-slate-300">{status.config.sellPercentageOfNetFlow}% of net flow</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Cooldown:</span>
+                    <span className="text-slate-300">{status.config.cooldownSeconds}s</span>
+                  </div>
+                  <div className="text-amber-400 text-center font-medium mt-2 pt-2 border-t border-slate-700/50">
+                    Triggers on positive net flow only
+                  </div>
                 </div>
               )}
             </CardContent>
@@ -546,108 +585,120 @@ export default function AutoSellDashboard() {
 
         {/* Monitoring Dashboard */}
         <div className="lg:col-span-2 space-y-6">
+          {/* Market Metrics Cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Card className="bg-green-900/20 border-green-600/50">
-              <CardContent className="p-4 text-center">
-                <TrendingUp className="w-8 h-8 mx-auto mb-2 text-green-400" />
-                <div className="text-2xl font-bold text-green-400">${status.metrics.buyVolumeUsd.toFixed(0)}</div>
-                <div className="text-sm text-green-300">Buy Volume</div>
-                <div className="text-xs text-slate-400">{config.timeWindowSeconds}s window</div>
+            <Card className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border-emerald-500/30 shadow-lg hover:shadow-emerald-500/20 transition-all">
+              <CardContent className="p-6 text-center">
+                <TrendingUp className="w-8 h-8 mx-auto mb-3 text-emerald-400" />
+                <div className="text-3xl font-bold text-emerald-400">${status.metrics.buyVolumeUsd.toFixed(0)}</div>
+                <div className="text-sm text-emerald-300 font-medium">Buy Volume</div>
+                <div className="text-xs text-slate-400 mt-1">{config.timeWindowSeconds}s window</div>
               </CardContent>
             </Card>
 
-            <Card className="bg-red-900/20 border-red-600/50">
-              <CardContent className="p-4 text-center">
-                <TrendingDown className="w-8 h-8 mx-auto mb-2 text-red-400" />
-                <div className="text-2xl font-bold text-red-400">${status.metrics.sellVolumeUsd.toFixed(0)}</div>
-                <div className="text-sm text-red-300">Sell Volume</div>
-                <div className="text-xs text-slate-400">{config.timeWindowSeconds}s window</div>
+            <Card className="bg-gradient-to-br from-rose-500/10 to-rose-600/10 border-rose-500/30 shadow-lg hover:shadow-rose-500/20 transition-all">
+              <CardContent className="p-6 text-center">
+                <TrendingDown className="w-8 h-8 mx-auto mb-3 text-rose-400" />
+                <div className="text-3xl font-bold text-rose-400">${status.metrics.sellVolumeUsd.toFixed(0)}</div>
+                <div className="text-sm text-rose-300 font-medium">Sell Volume</div>
+                <div className="text-xs text-slate-400 mt-1">{config.timeWindowSeconds}s window</div>
               </CardContent>
             </Card>
 
             <Card
-              className={`${status.metrics.netUsdFlow >= 0 ? "bg-green-900/20 border-green-600/50" : "bg-red-900/20 border-red-600/50"}`}
+              className={`${
+                status.metrics.netUsdFlow >= 0
+                  ? "bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border-emerald-500/30 shadow-lg hover:shadow-emerald-500/20"
+                  : "bg-gradient-to-br from-rose-500/10 to-rose-600/10 border-rose-500/30 shadow-lg hover:shadow-rose-500/20"
+              } transition-all`}
             >
-              <CardContent className="p-4 text-center">
+              <CardContent className="p-6 text-center">
                 <BarChart3
-                  className={`w-8 h-8 mx-auto mb-2 ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}
+                  className={`w-8 h-8 mx-auto mb-3 ${status.metrics.netUsdFlow >= 0 ? "text-emerald-400" : "text-rose-400"}`}
                 />
                 <div
-                  className={`text-2xl font-bold ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}
+                  className={`text-3xl font-bold ${status.metrics.netUsdFlow >= 0 ? "text-emerald-400" : "text-rose-400"}`}
                 >
                   {status.metrics.netUsdFlow >= 0 ? "+" : ""}${status.metrics.netUsdFlow.toFixed(0)}
                 </div>
-                <div className={`text-sm ${status.metrics.netUsdFlow >= 0 ? "text-green-300" : "text-red-300"}`}>
+                <div
+                  className={`text-sm font-medium ${status.metrics.netUsdFlow >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+                >
                   Net Flow
                 </div>
-                <div className="text-xs text-slate-400">
-                  {status.metrics.netUsdFlow >= config.minNetFlowUsd ? "🟢 Above threshold" : "🔴 Below threshold"}
+                <div className="text-xs text-slate-400 mt-1">
+                  {status.metrics.netUsdFlow > 0 ? "🟢 Positive flow" : "🔴 No positive flow"}
                 </div>
               </CardContent>
             </Card>
 
-            <Card className="bg-blue-900/20 border-blue-600/50">
-              <CardContent className="p-4 text-center">
-                <DollarSign className="w-8 h-8 mx-auto mb-2 text-blue-400" />
-                <div className="text-2xl font-bold text-blue-400">${status.metrics.currentPriceUsd.toFixed(6)}</div>
-                <div className="text-sm text-blue-300">Current Price</div>
-                <div className="text-xs text-slate-400">{status.metrics.currentPrice.toFixed(8)} SOL</div>
+            <Card className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border-blue-500/30 shadow-lg hover:shadow-blue-500/20 transition-all">
+              <CardContent className="p-6 text-center">
+                <DollarSign className="w-8 h-8 mx-auto mb-3 text-blue-400" />
+                <div className="text-3xl font-bold text-blue-400">${status.metrics.currentPriceUsd.toFixed(6)}</div>
+                <div className="text-sm text-blue-300 font-medium">Current Price</div>
+                <div className="text-xs text-slate-400 mt-1">{status.metrics.currentPrice.toFixed(8)} SOL</div>
               </CardContent>
             </Card>
           </div>
 
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity className="w-5 h-5" />
+          {/* Market Activity Monitor */}
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-green-500/20">
+                  <Activity className="w-5 h-5 text-green-400" />
+                </div>
                 Market Activity Monitor
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-2 gap-6">
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Buy Pressure:</span>
-                    <span className="text-green-400 font-mono">${status.metrics.buyVolumeUsd.toFixed(2)}</span>
+              <div className="grid grid-cols-2 gap-8">
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                    <span className="text-slate-400 font-medium">Buy Pressure:</span>
+                    <span className="text-emerald-400 font-mono font-bold text-lg">
+                      ${status.metrics.buyVolumeUsd.toFixed(2)}
+                    </span>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Sell Pressure:</span>
-                    <span className="text-red-400 font-mono">${status.metrics.sellVolumeUsd.toFixed(2)}</span>
+                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                    <span className="text-slate-400 font-medium">Sell Pressure:</span>
+                    <span className="text-rose-400 font-mono font-bold text-lg">
+                      ${status.metrics.sellVolumeUsd.toFixed(2)}
+                    </span>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Net Flow:</span>
-                    <span className={`font-mono ${status.metrics.netUsdFlow >= 0 ? "text-green-400" : "text-red-400"}`}>
+                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                    <span className="text-slate-400 font-medium">Net Flow:</span>
+                    <span
+                      className={`font-mono font-bold text-lg ${status.metrics.netUsdFlow >= 0 ? "text-emerald-400" : "text-rose-400"}`}
+                    >
                       {status.metrics.netUsdFlow >= 0 ? "+" : ""}${status.metrics.netUsdFlow.toFixed(2)}
                     </span>
                   </div>
                 </div>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Trigger Threshold:</span>
-                    <span className="text-yellow-400 font-mono">${config.minNetFlowUsd}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Sell Amount:</span>
-                    <span className="text-blue-400 font-mono">
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                    <span className="text-slate-400 font-medium">Sell Amount:</span>
+                    <span className="text-blue-400 font-mono font-bold text-lg">
                       ${Math.max(0, (status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Last Sell:</span>
-                    <span className="text-slate-300 font-mono">
+                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                    <span className="text-slate-400 font-medium">Last Sell:</span>
+                    <span className="text-slate-300 font-mono font-bold text-lg">
                       {status.metrics.lastSellTrigger > 0 ? `${timeSinceLastSell}s ago` : "Never"}
                     </span>
                   </div>
                 </div>
               </div>
 
-              {status.metrics.netUsdFlow >= config.minNetFlowUsd && (
-                <div className="mt-4 p-3 bg-green-900/20 border border-green-600/50 rounded-lg">
-                  <div className="flex items-center gap-2 text-green-400">
-                    <TrendingUp className="w-4 h-4" />
-                    <span className="font-semibold">SELL TRIGGER ACTIVE</span>
+              {status.metrics.netUsdFlow > 0 && status.metrics.buyVolumeUsd > 0 && (
+                <div className="mt-6 p-4 bg-gradient-to-r from-emerald-500/10 to-green-500/10 border border-emerald-500/30 rounded-xl shadow-lg">
+                  <div className="flex items-center gap-3 text-emerald-400 mb-2">
+                    <TrendingUp className="w-5 h-5" />
+                    <span className="font-bold text-lg">SELL TRIGGER ACTIVE</span>
                   </div>
-                  <p className="text-sm text-green-300 mt-1">
+                  <p className="text-sm text-emerald-300 font-medium">
                     Net buying pressure detected! Will sell {config.sellPercentageOfNetFlow}% of $
                     {status.metrics.netUsdFlow.toFixed(2)} = $
                     {((status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)} worth of tokens
@@ -657,29 +708,61 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Wallet className="w-5 h-5" />
+          {/* Transaction History */}
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-indigo-500/20">
+                  <BarChart3 className="w-5 h-5 text-indigo-400" />
+                </div>
+                Transaction History
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-center py-12 text-slate-400">
+                <BarChart3 className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                <p className="text-lg font-medium">No transactions yet</p>
+                <p className="text-sm">Sell transactions will appear here</p>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Wallet Status */}
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-cyan-500/20">
+                  <Wallet className="w-5 h-5 text-cyan-400" />
+                </div>
                 Wallet Status
               </CardTitle>
             </CardHeader>
             <CardContent>
               {status.walletStatus.length === 0 ? (
-                <div className="text-center py-8 text-slate-400">
-                  <Wallet className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>No wallets configured</p>
+                <div className="text-center py-12 text-slate-400">
+                  <Wallet className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                  <p className="text-lg font-medium">No wallets configured</p>
                   <p className="text-sm">Start the engine to see wallet status</p>
                 </div>
               ) : (
-                <div className="space-y-3 max-h-60 overflow-auto">
+                <div className="space-y-3 max-h-64 overflow-auto">
                   {status.walletStatus.map((wallet, idx) => (
-                    <div key={idx} className="p-3 bg-slate-800/50 rounded-lg">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-mono text-sm text-slate-300">
+                    <div
+                      key={idx}
+                      className="p-4 bg-slate-800/40 rounded-xl border border-slate-700/30 hover:bg-slate-800/60 transition-colors"
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="font-mono text-sm text-slate-300 font-medium">
                           {wallet.publicKey.slice(0, 8)}...{wallet.publicKey.slice(-4)}
                         </span>
-                        <Badge variant={wallet.cooldownUntil > Date.now() ? "secondary" : "default"}>
+                        <Badge
+                          variant={wallet.cooldownUntil > Date.now() ? "secondary" : "default"}
+                          className={
+                            wallet.cooldownUntil > Date.now()
+                              ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
+                              : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                          }
+                        >
                           {wallet.cooldownUntil > Date.now() ? (
                             <>
                               <Clock className="w-3 h-3 mr-1" />
@@ -691,13 +774,13 @@ export default function AutoSellDashboard() {
                         </Badge>
                       </div>
                       <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div>
-                          <span className="text-slate-400">SOL: </span>
-                          <span className="text-white font-mono">{wallet.balance.toFixed(4)}</span>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">SOL:</span>
+                          <span className="text-white font-mono font-medium">{wallet.balance.toFixed(4)}</span>
                         </div>
-                        <div>
-                          <span className="text-slate-400">Tokens: </span>
-                          <span className="text-white font-mono">{wallet.tokenBalance.toFixed(2)}</span>
+                        <div className="flex justify-between">
+                          <span className="text-slate-400">Tokens:</span>
+                          <span className="text-white font-mono font-medium">{wallet.tokenBalance.toFixed(2)}</span>
                         </div>
                       </div>
                     </div>
@@ -708,14 +791,19 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* System Log */}
-          <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader>
-              <CardTitle>System Log</CardTitle>
+          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-slate-500/20">
+                  <Activity className="w-5 h-5 text-slate-400" />
+                </div>
+                System Log
+              </CardTitle>
             </CardHeader>
             <CardContent>
-              <pre className="text-xs whitespace-pre-wrap bg-black/30 p-4 rounded-lg max-h-40 overflow-auto">
+              <pre className="text-xs whitespace-pre-wrap bg-slate-950/60 border border-slate-800/50 p-4 rounded-xl max-h-48 overflow-auto font-mono text-slate-300 leading-relaxed">
                 {log ||
-                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when above $${config.minNetFlowUsd} threshold.`}
+                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when net flow > $0.`}
               </pre>
             </CardContent>
           </Card>
