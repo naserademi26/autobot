@@ -736,6 +736,9 @@ async function collectBitqueryPrimaryData() {
             Block {
               Time
             }
+            Transaction {
+              Signature
+            }
           }
         }
       }
@@ -766,18 +769,37 @@ async function collectBitqueryPrimaryData() {
 
     let buyVolumeUsd = 0
     let sellVolumeUsd = 0
+    const processedTransactions = new Set()
 
-    trades.forEach((trade: any) => {
+    console.log(`[BITQUERY] Processing ${trades.length} raw trades...`)
+
+    trades.forEach((trade: any, index: number) => {
       const side = trade.Trade?.Side
       const amountUSD = Number.parseFloat(side?.AmountInUSD || 0)
+      const signature = trade.Transaction?.Signature
+      const timestamp = trade.Block?.Time
+
+      // Skip duplicate transactions
+      if (signature && processedTransactions.has(signature)) {
+        console.log(`[BITQUERY] Skipping duplicate transaction: ${signature}`)
+        return
+      }
+
+      if (signature) {
+        processedTransactions.add(signature)
+      }
+
+      console.log(
+        `[BITQUERY] Trade ${index + 1}: Type=${side?.Type}, Amount=$${amountUSD.toFixed(2)}, Time=${timestamp}, Sig=${signature?.substring(0, 8)}...`,
+      )
 
       if (amountUSD > 0) {
         if (side?.Type === "buy") {
           buyVolumeUsd += amountUSD
-          console.log(`[BITQUERY] Real BUY: $${amountUSD.toFixed(2)}`)
+          console.log(`[BITQUERY] ✅ BUY: $${amountUSD.toFixed(2)} (Total: $${buyVolumeUsd.toFixed(2)})`)
         } else if (side?.Type === "sell") {
           sellVolumeUsd += amountUSD
-          console.log(`[BITQUERY] Real SELL: $${amountUSD.toFixed(2)}`)
+          console.log(`[BITQUERY] ❌ SELL: $${amountUSD.toFixed(2)} (Total: $${sellVolumeUsd.toFixed(2)})`)
         }
       }
     })
@@ -787,16 +809,24 @@ async function collectBitqueryPrimaryData() {
     autoSellState.metrics.netUsdFlow = buyVolumeUsd - sellVolumeUsd
 
     console.log(
-      `[BITQUERY] ✅ Real transactions: ${trades.length} trades, Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      `[BITQUERY] ✅ Final results: ${processedTransactions.size} unique transactions, Buy $${buyVolumeUsd.toFixed(2)}, Sell $${sellVolumeUsd.toFixed(2)}, Net $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
     )
+
+    if (buyVolumeUsd > 0) {
+      console.log(`[BITQUERY] 🎯 Detected buying pressure: $${buyVolumeUsd.toFixed(2)} - should match DexTools data`)
+    }
   } catch (error) {
     console.error("[BITQUERY] Data collection failed:", error.message)
 
-    autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
-
-    console.log("[BITQUERY] No real transaction data available, setting volumes to $0")
+    try {
+      await collectDexScreenerFallbackData()
+      console.log("[BITQUERY] ✅ Using DexScreener fallback data")
+    } catch (fallbackError) {
+      console.error("[BITQUERY] Fallback also failed:", fallbackError.message)
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
+    }
   }
 }
 
