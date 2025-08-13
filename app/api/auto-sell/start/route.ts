@@ -337,10 +337,10 @@ async function monitorMarketActivity() {
     autoSellState.metrics.solPriceUsd = solPriceUsd
 
     const dexController = new AbortController()
-    const dexTimeout = setTimeout(() => dexController.abort(), 12000)
+    const dexTimeout = setTimeout(() => dexController.abort(), 15000)
 
     try {
-      // Get token pair data for current price
+      // Get current price first
       const pairResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
         signal: dexController.signal,
         headers: { "User-Agent": "AutoSellBot/1.0" },
@@ -353,7 +353,7 @@ async function monitorMarketActivity() {
       const pairData = await pairResponse.json()
 
       if (!pairData.pairs || !Array.isArray(pairData.pairs) || pairData.pairs.length === 0) {
-        console.log("[MARKET MONITOR] No trading pairs found")
+        console.log("[REAL MONITOR] No trading pairs found")
         return
       }
 
@@ -363,7 +363,7 @@ async function monitorMarketActivity() {
       )
 
       if (validPairs.length === 0) {
-        console.log("[MARKET MONITOR] No valid pairs found")
+        console.log("[REAL MONITOR] No valid pairs found")
         return
       }
 
@@ -378,112 +378,155 @@ async function monitorMarketActivity() {
         autoSellState.metrics.currentPrice = currentPrice
         autoSellState.metrics.currentPriceUsd = currentPriceUsd
       } else {
-        console.warn("[MARKET MONITOR] Invalid price data received")
+        console.warn("[REAL MONITOR] Invalid price data received")
         return
       }
 
-      const searchResponse = await fetch(
-        `https://api.dexscreener.com/latest/dex/search/?q=${autoSellState.config.mint}`,
-        {
+      let realTransactions = []
+
+      try {
+        // Try to get recent transactions from DexScreener
+        const txResponse = await fetch(`https://api.dexscreener.com/orders/v1/${autoSellState.config.mint}?limit=50`, {
           signal: dexController.signal,
           headers: { "User-Agent": "AutoSellBot/1.0" },
-        },
-      )
+        })
 
-      let realBuyVolumeUsd = 0
-      let realSellVolumeUsd = 0
+        if (txResponse.ok) {
+          const txData = await txResponse.json()
+          if (txData && Array.isArray(txData)) {
+            realTransactions = txData
+          }
+        }
+      } catch (txError) {
+        console.warn("[REAL MONITOR] Failed to fetch transaction data:", txError.message)
+      }
 
-      if (searchResponse.ok) {
-        const searchData = await searchResponse.json()
-        const searchPair = searchData.pairs?.find(
-          (p: any) =>
-            p.baseToken?.address === autoSellState.config.mint || p.quoteToken?.address === autoSellState.config.mint,
-        )
+      if (realTransactions.length === 0) {
+        try {
+          const { Connection, PublicKey } = await import("@solana/web3.js")
 
-        if (searchPair) {
-          // Use real volume data from the last few minutes
-          const volume5m = Number(searchPair.volume?.m5 || 0)
-          const volume1h = Number(searchPair.volume?.h1 || 0)
-          const priceChange5m = Number(searchPair.priceChange?.m5 || 0)
+          const connection = new Connection(
+            process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+              process.env.NEXT_PUBLIC_RPC_URL ||
+              "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+            { commitment: "confirmed" },
+          )
 
-          // Calculate buy/sell ratio based on recent price movement
-          const buyRatio =
-            priceChange5m > 0 ? Math.min(0.8, 0.5 + priceChange5m / 100) : Math.max(0.2, 0.5 + priceChange5m / 100)
+          // Get recent signatures for the token mint
+          const mintPubkey = new PublicKey(autoSellState.config.mint)
+          const signatures = await connection.getSignaturesForAddress(mintPubkey, { limit: 20 })
 
-          // Use 5-minute volume scaled to our time window
-          const windowMinutes = autoSellState.config.timeWindowSeconds / 60
-          const scaledVolume = (volume5m / 5) * windowMinutes
+          const recentSignatures = signatures.filter(
+            (sig) => Date.now() - (sig.blockTime || 0) * 1000 < 5 * 60 * 1000, // Last 5 minutes
+          )
 
-          realBuyVolumeUsd = scaledVolume * buyRatio
-          realSellVolumeUsd = scaledVolume * (1 - buyRatio)
+          console.log(`[REAL MONITOR] Found ${recentSignatures.length} recent transactions`)
+
+          // Analyze recent transactions to determine buy/sell activity
+          let realBuyVolumeUsd = 0
+          let realSellVolumeUsd = 0
+
+          for (const sig of recentSignatures.slice(0, 10)) {
+            // Analyze last 10 transactions
+            try {
+              const tx = await connection.getParsedTransaction(sig.signature, { commitment: "confirmed" })
+
+              if (tx && tx.meta && !tx.meta.err) {
+                // Analyze transaction to determine if it's a buy or sell
+                const preBalances = tx.meta.preBalances
+                const postBalances = tx.meta.postBalances
+
+                // Simple heuristic: if SOL balance decreased, it's likely a buy
+                // if SOL balance increased, it's likely a sell
+                let isBuy = false
+                let transactionValue = 0
+
+                for (let i = 0; i < preBalances.length && i < postBalances.length; i++) {
+                  const solChange = (postBalances[i] - preBalances[i]) / 1e9
+                  if (Math.abs(solChange) > 0.001) {
+                    // Significant SOL change
+                    if (solChange < 0) {
+                      isBuy = true
+                      transactionValue = Math.abs(solChange) * solPriceUsd
+                    } else {
+                      isBuy = false
+                      transactionValue = Math.abs(solChange) * solPriceUsd
+                    }
+                    break
+                  }
+                }
+
+                if (transactionValue > 0.1) {
+                  // Only count transactions > $0.10
+                  if (isBuy) {
+                    realBuyVolumeUsd += transactionValue
+                  } else {
+                    realSellVolumeUsd += transactionValue
+                  }
+                }
+              }
+            } catch (txError) {
+              // Skip failed transaction analysis
+              continue
+            }
+          }
 
           console.log(
-            `[REAL TRADES] 5m Volume: $${volume5m.toFixed(2)} | Price Change: ${priceChange5m.toFixed(2)}% | Buy Ratio: ${(buyRatio * 100).toFixed(1)}%`,
+            `[REAL TRANSACTIONS] Analyzed ${recentSignatures.length} transactions: $${realBuyVolumeUsd.toFixed(2)} buys, $${realSellVolumeUsd.toFixed(2)} sells`,
           )
+
+          clearTimeout(dexTimeout)
+
+          const currentTime = Date.now()
+          const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
+
+          // Clean old trades
+          autoSellState.marketTrades = autoSellState.marketTrades
+            .filter((trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs)
+            .slice(-50)
+
+          // Add real transaction data
+          if (realBuyVolumeUsd > 0 || realSellVolumeUsd > 0) {
+            const tradeData = {
+              timestamp: currentTime,
+              buyVolumeUsd: realBuyVolumeUsd,
+              sellVolumeUsd: realSellVolumeUsd,
+              priceUsd: autoSellState.metrics.currentPriceUsd,
+              source: "real_transactions",
+            }
+
+            autoSellState.marketTrades.push(tradeData)
+          }
+
+          const buyVolumeUsd = autoSellState.marketTrades.reduce(
+            (sum, trade) => sum + (Number(trade.buyVolumeUsd) || 0),
+            0,
+          )
+          const sellVolumeUsd = autoSellState.marketTrades.reduce(
+            (sum, trade) => sum + (Number(trade.sellVolumeUsd) || 0),
+            0,
+          )
+          const netUsdFlow = buyVolumeUsd - sellVolumeUsd
+
+          if (isFinite(buyVolumeUsd) && isFinite(sellVolumeUsd) && isFinite(netUsdFlow)) {
+            autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
+            autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
+            autoSellState.metrics.netUsdFlow = netUsdFlow
+          }
+
+          console.log(
+            `[REAL MONITOR] Price: $${autoSellState.metrics.currentPriceUsd.toFixed(6)} | Window Buy: $${buyVolumeUsd.toFixed(2)} | Window Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)} | Real Trades: ${autoSellState.marketTrades.length}`,
+          )
+
+          return
+        } catch (heliusError) {
+          console.warn("[REAL MONITOR] Helius transaction monitoring failed:", heliusError.message)
         }
       }
 
-      if (realBuyVolumeUsd === 0 && realSellVolumeUsd === 0) {
-        const txns24h = Number(pair.txns?.h24?.buys || 0) + Number(pair.txns?.h24?.sells || 0)
-        const volume24h = Number(pair.volume?.h24 || 0)
-
-        if (txns24h > 0 && volume24h > 0) {
-          // Estimate recent activity based on transaction frequency
-          const avgTxnValue = volume24h / txns24h
-          const recentTxns = Math.max(1, txns24h / ((24 * 60) / autoSellState.config.timeWindowSeconds))
-          const estimatedVolume = avgTxnValue * recentTxns
-
-          const priceChange1h = Number(pair.priceChange?.h1 || 0)
-          const buyRatio =
-            priceChange1h > 0 ? Math.min(0.75, 0.5 + priceChange1h / 200) : Math.max(0.25, 0.5 + priceChange1h / 200)
-
-          realBuyVolumeUsd = estimatedVolume * buyRatio
-          realSellVolumeUsd = estimatedVolume * (1 - buyRatio)
-
-          console.log(
-            `[ESTIMATED TRADES] Recent Txns: ${recentTxns.toFixed(1)} | Avg Value: $${avgTxnValue.toFixed(2)} | Buy Ratio: ${(buyRatio * 100).toFixed(1)}%`,
-          )
-        }
-      }
+      console.log("[REAL MONITOR] No real transaction data available - waiting for actual trades")
 
       clearTimeout(dexTimeout)
-
-      const currentTime = Date.now()
-      const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
-
-      // Clean old trades
-      autoSellState.marketTrades = autoSellState.marketTrades
-        .filter((trade) => trade && trade.timestamp && currentTime - trade.timestamp < timeWindowMs)
-        .slice(-50) // Keep last 50 trades max
-
-      // Add new trade data if we have meaningful volume
-      if (realBuyVolumeUsd > 0.01 || realSellVolumeUsd > 0.01) {
-        const tradeData = {
-          timestamp: currentTime,
-          buyVolumeUsd: realBuyVolumeUsd,
-          sellVolumeUsd: realSellVolumeUsd,
-          priceUsd: autoSellState.metrics.currentPriceUsd,
-        }
-
-        autoSellState.marketTrades.push(tradeData)
-      }
-
-      const buyVolumeUsd = autoSellState.marketTrades.reduce((sum, trade) => sum + (Number(trade.buyVolumeUsd) || 0), 0)
-      const sellVolumeUsd = autoSellState.marketTrades.reduce(
-        (sum, trade) => sum + (Number(trade.sellVolumeUsd) || 0),
-        0,
-      )
-      const netUsdFlow = buyVolumeUsd - sellVolumeUsd
-
-      if (isFinite(buyVolumeUsd) && isFinite(sellVolumeUsd) && isFinite(netUsdFlow)) {
-        autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
-        autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
-        autoSellState.metrics.netUsdFlow = netUsdFlow
-      }
-
-      console.log(
-        `[MARKET MONITOR] Price: $${autoSellState.metrics.currentPriceUsd.toFixed(6)} | Window Buy: $${buyVolumeUsd.toFixed(2)} | Window Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)} | Trades: ${autoSellState.marketTrades.length}`,
-      )
     } catch (dexError: any) {
       clearTimeout(dexTimeout)
       if (dexError.name === "AbortError") {
@@ -493,7 +536,7 @@ async function monitorMarketActivity() {
       }
     }
   } catch (error: any) {
-    console.error("Market monitoring error:", error)
+    console.error("Real transaction monitoring error:", error)
     throw error
   }
 }
