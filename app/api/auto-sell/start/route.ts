@@ -92,54 +92,72 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Auto-sell engine is already running" }, { status: 400 })
     }
 
-    // Validate configuration
     if (!config.mint || !privateKeys || privateKeys.length === 0) {
+      console.error("[AUTO-SELL] Invalid configuration:", {
+        hasMint: !!config.mint,
+        hasPrivateKeys: !!privateKeys,
+        privateKeysLength: privateKeys?.length,
+      })
       return NextResponse.json({ error: "Invalid configuration or no wallets provided" }, { status: 400 })
     }
 
     try {
+      if (autoSellState.intervals.length > 0) {
+        console.log(`[AUTO-SELL] Clearing ${autoSellState.intervals.length} existing intervals`)
+        autoSellState.intervals.forEach((interval) => {
+          try {
+            clearInterval(interval)
+          } catch (e) {
+            console.warn("[AUTO-SELL] Error clearing interval:", e)
+          }
+        })
+        autoSellState.intervals = []
+      }
       ResourceManager.cleanup()
-      autoSellState.intervals.forEach((interval) => clearInterval(interval))
-      autoSellState.intervals = []
       console.log("[AUTO-SELL] Cleanup completed successfully")
     } catch (cleanupError) {
       console.warn("[AUTO-SELL] Cleanup warning:", cleanupError)
     }
 
-    // Initialize wallets
-    const { Keypair } = await import("@solana/web3.js")
-    const bs58 = await import("bs58")
-
     const wallets = []
-    for (let i = 0; i < privateKeys.length; i++) {
-      try {
-        const privateKey = privateKeys[i]
-        let keypair
+    try {
+      const { Keypair } = await import("@solana/web3.js")
+      const bs58 = await import("bs58")
 
-        if (privateKey.startsWith("[")) {
-          const arr = Uint8Array.from(JSON.parse(privateKey))
-          keypair = Keypair.fromSecretKey(arr)
-        } else {
-          const secret = bs58.default.decode(privateKey)
-          keypair = Keypair.fromSecretKey(secret)
+      for (let i = 0; i < privateKeys.length; i++) {
+        try {
+          const privateKey = privateKeys[i]
+          let keypair
+
+          if (privateKey.startsWith("[")) {
+            const arr = Uint8Array.from(JSON.parse(privateKey))
+            keypair = Keypair.fromSecretKey(arr)
+          } else {
+            const secret = bs58.default.decode(privateKey)
+            keypair = Keypair.fromSecretKey(secret)
+          }
+
+          wallets.push({
+            name: `Wallet ${i + 1}`,
+            keypair,
+            publicKey: keypair.publicKey.toBase58(),
+            cooldownUntil: 0,
+            balance: 0,
+            tokenBalance: 0,
+            lastTransactionSignature: "",
+          })
+          console.log(`[AUTO-SELL] ✅ Successfully parsed wallet ${i + 1}: ${keypair.publicKey.toBase58()}`)
+        } catch (error) {
+          console.error(`[AUTO-SELL] ❌ Failed to parse wallet ${i}:`, error)
         }
-
-        wallets.push({
-          name: `Wallet ${i + 1}`,
-          keypair,
-          publicKey: keypair.publicKey.toBase58(),
-          cooldownUntil: 0,
-          balance: 0,
-          tokenBalance: 0,
-          lastTransactionSignature: "",
-        })
-        console.log(`[AUTO-SELL] Successfully parsed wallet ${i + 1}: ${keypair.publicKey.toBase58()}`)
-      } catch (error) {
-        console.error(`Failed to parse wallet ${i}:`, error)
       }
+    } catch (importError) {
+      console.error("[AUTO-SELL] Failed to import Solana dependencies:", importError)
+      return NextResponse.json({ error: "Failed to initialize Solana dependencies" }, { status: 500 })
     }
 
     if (wallets.length === 0) {
+      console.error("[AUTO-SELL] No valid wallets could be parsed")
       return NextResponse.json({ error: "No valid wallets could be parsed" }, { status: 400 })
     }
 
@@ -152,25 +170,30 @@ export async function POST(request: NextRequest) {
     }
     autoSellState.wallets = wallets
     autoSellState.marketTrades = []
+    autoSellState.transactionHistory = []
+    autoSellState.botStartTime = Date.now()
+    autoSellState.firstAnalysisTime = autoSellState.botStartTime + autoSellState.config.timeWindowSeconds * 1000
     autoSellState.isRunning = true
 
-    console.log("[AUTO-SELL] Configuration set successfully")
-    console.log("[AUTO-SELL] Fetching wallet balances immediately...")
+    console.log("[AUTO-SELL] ✅ Configuration set successfully")
+    console.log(`[AUTO-SELL] Bot will start analysis in ${autoSellState.config.timeWindowSeconds} seconds`)
 
     try {
+      console.log("[AUTO-SELL] Fetching initial wallet balances...")
       await updateAllWalletBalances()
-      console.log("[AUTO-SELL] Initial wallet balance fetch completed")
+      console.log("[AUTO-SELL] ✅ Initial wallet balance fetch completed")
     } catch (balanceError) {
-      console.warn("[AUTO-SELL] Initial balance fetch failed, will retry:", balanceError)
+      console.warn("[AUTO-SELL] ⚠️ Initial balance fetch failed, will retry:", balanceError)
     }
 
     try {
+      console.log("[AUTO-SELL] Starting auto-sell engine...")
       await startAutoSellEngine()
-      console.log("[AUTO-SELL] Engine started successfully")
+      console.log("[AUTO-SELL] ✅ Engine started successfully")
     } catch (engineError) {
-      console.error("[AUTO-SELL] Engine startup failed:", engineError)
+      console.error("[AUTO-SELL] ❌ Engine startup failed:", engineError)
       autoSellState.isRunning = false
-      throw engineError
+      return NextResponse.json({ error: `Engine startup failed: ${engineError.message}` }, { status: 500 })
     }
 
     return NextResponse.json({
@@ -185,56 +208,66 @@ export async function POST(request: NextRequest) {
       })),
     })
   } catch (error) {
-    console.error("Error starting auto-sell:", error)
-    console.error("Error stack:", error.stack)
+    console.error("[AUTO-SELL] ❌ Critical startup error:", error)
+    console.error("[AUTO-SELL] Error stack:", error.stack)
     autoSellState.isRunning = false
-    return NextResponse.json({ error: `Failed to start auto-sell engine: ${error.message}` }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: `Failed to start auto-sell engine: ${error.message}`,
+        details: error.stack,
+      },
+      { status: 500 },
+    )
   }
 }
 
 async function startAutoSellEngine() {
   try {
-    ResourceManager.cleanup()
-    autoSellState.intervals.forEach((interval) => clearInterval(interval))
-    autoSellState.intervals = []
+    console.log("[AUTO-SELL] Initializing engine components...")
 
-    autoSellState.botStartTime = Date.now()
-    const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
-    autoSellState.firstAnalysisTime = autoSellState.botStartTime + timeWindowMs
-
-    console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
-    console.log(`[AUTO-SELL] First analysis will begin at ${new Date(autoSellState.firstAnalysisTime).toISOString()}`)
-    console.log(
-      `[AUTO-SELL] Waiting ${autoSellState.config.timeWindowSeconds} seconds before starting market analysis...`,
-    )
-
-    try {
-      await startConfigurableAnalysisCycle()
-      console.log("[AUTO-SELL] Analysis cycle started successfully")
-    } catch (analysisError) {
-      console.error("[AUTO-SELL] Analysis cycle startup failed:", analysisError)
-      throw analysisError
+    // Initialize metrics
+    autoSellState.metrics = {
+      totalBought: 0,
+      totalSold: 0,
+      currentPrice: 0,
+      currentPriceUsd: 0,
+      solPriceUsd: 100,
+      netUsdFlow: 0,
+      buyVolumeUsd: 0,
+      sellVolumeUsd: 0,
+      lastSellTrigger: 0,
+      botExecutedSellsUsd: 0,
+      totalMarketSellsUsd: 0,
+      lastSellTime: 0,
     }
 
-    const balanceInterval = setInterval(async () => {
-      if (!autoSellState.isRunning) return
-      autoSellState.lastActivity = Date.now()
-
-      try {
-        await updateAllWalletBalances()
-        console.log("[AUTO-SELL] Wallet balances updated")
-        monitorMemoryUsage()
-      } catch (error) {
-        console.error("Balance update error:", error)
+    // Start SOL price monitoring
+    updateSolPrice()
+    const solPriceInterval = setInterval(() => {
+      if (autoSellState.isRunning) {
+        updateSolPrice()
       }
-    }, 45000)
+    }, 60000) // Update SOL price every minute
 
-    autoSellState.intervals.push(balanceInterval)
-    ResourceManager.addTimer(balanceInterval)
-    console.log("[AUTO-SELL] Balance monitoring interval started")
+    autoSellState.intervals.push(solPriceInterval)
+    ResourceManager.addTimer(solPriceInterval)
+
+    // Start memory monitoring (if available)
+    const memoryInterval = setInterval(() => {
+      if (autoSellState.isRunning) {
+        monitorMemoryUsage()
+      }
+    }, 30000) // Check memory every 30 seconds
+
+    autoSellState.intervals.push(memoryInterval)
+    ResourceManager.addTimer(memoryInterval)
+
+    // Start the analysis cycle
+    await startConfigurableAnalysisCycle()
+
+    console.log("[AUTO-SELL] ✅ All engine components started successfully")
   } catch (error) {
-    console.error("[AUTO-SELL] Engine startup failed:", error)
-    autoSellState.isRunning = false
+    console.error("[AUTO-SELL] ❌ Engine startup error:", error)
     throw error
   }
 }
@@ -1016,4 +1049,44 @@ function gracefulShutdown() {
   setTimeout(() => {
     process.exit(0)
   }, 1000) // Reduced from 2000ms
+}
+
+async function collectSolanaRpcData() {
+  const { Connection, PublicKey } = await import("@solana/web3.js")
+
+  const rpcEndpoints = [
+    process.env.NEXT_PUBLIC_RPC_URL,
+    process.env.NEXT_PUBLIC_HELIUS_RPC_URL,
+    "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+    "https://api.mainnet-beta.solana.com",
+  ].filter(Boolean)
+
+  let connection = null
+  let lastError = null
+
+  for (const endpoint of rpcEndpoints) {
+    try {
+      connection = new Connection(endpoint, {
+        commitment: "confirmed",
+        httpHeaders: {
+          "User-Agent": "solana-auto-sell-bot/1.0",
+        },
+      })
+
+      // Test the connection
+      await connection.getLatestBlockhash()
+      console.log(`[SOLANA-RPC] ✅ Connected to: ${endpoint}`)
+      break
+    } catch (error) {
+      console.warn(`[SOLANA-RPC] ⚠️ Failed to connect to ${endpoint}:`, error.message)
+      lastError = error
+      connection = null
+    }
+  }
+
+  if (!connection) {
+    throw new Error(`Failed to connect to any RPC endpoint. Last error: ${lastError?.message}`)
+  }
+
+  return connection
 }
