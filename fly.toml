@@ -34,8 +34,3 @@ primary_region = "iad"
 
 [deploy]
   release_command = "echo 'Deployment complete'"
-
-[restart]
-  policy = "on-failure"
-  max_restarts = 3
-  restart_delay = "10s"
