@@ -214,18 +214,18 @@ async function collectDirectSolanaTransactions() {
     { commitment: "confirmed" },
   )
 
-  const timeWindowSeconds = autoSellState.config.timeWindowSeconds
-  const cutoffTime = Date.now() - timeWindowSeconds * 1000
+  const monitoringStartTime = autoSellState.firstAnalysisTime
+  const currentTime = Date.now()
 
   console.log(
-    `[SOLANA-RPC] Monitoring transactions for token ${autoSellState.config.mint} from last ${timeWindowSeconds} seconds`,
+    `[SOLANA-RPC] Monitoring NEW transactions for token ${autoSellState.config.mint} from ${new Date(monitoringStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
   )
 
   try {
     // Get recent signatures for the token mint
     const mintPubkey = new PublicKey(autoSellState.config.mint)
     const signatures = await connection.getSignaturesForAddress(mintPubkey, {
-      limit: 50,
+      limit: 100, // Increased limit to catch more transactions
     })
 
     console.log(`[SOLANA-RPC] Found ${signatures.length} recent signatures`)
@@ -234,13 +234,13 @@ async function collectDirectSolanaTransactions() {
     let totalSellVolumeUsd = 0
     let buyCount = 0
     let sellCount = 0
+    const processedTransactions = []
 
     // Process each transaction
     for (const sigInfo of signatures) {
       const txTime = (sigInfo.blockTime || 0) * 1000
 
-      // Only process transactions within our time window
-      if (txTime < cutoffTime) {
+      if (txTime < monitoringStartTime) {
         continue
       }
 
@@ -256,17 +256,24 @@ async function collectDirectSolanaTransactions() {
         const tradeInfo = analyzeTransaction(tx, autoSellState.config.mint)
 
         if (tradeInfo) {
+          processedTransactions.push({
+            signature: tradeInfo.signature,
+            type: tradeInfo.type,
+            usdAmount: tradeInfo.usdAmount,
+            timestamp: txTime,
+          })
+
           if (tradeInfo.type === "buy") {
             totalBuyVolumeUsd += tradeInfo.usdAmount
             buyCount++
             console.log(
-              `[SOLANA-RPC] BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] ✅ BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
             )
           } else if (tradeInfo.type === "sell") {
             totalSellVolumeUsd += tradeInfo.usdAmount
             sellCount++
             console.log(
-              `[SOLANA-RPC] SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] ❌ SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
             )
           }
         }
@@ -276,16 +283,18 @@ async function collectDirectSolanaTransactions() {
       }
     }
 
+    autoSellState.marketTrades = processedTransactions
+
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
     console.log(
-      `[SOLANA-RPC] REAL TRANSACTION DATA - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
+      `[SOLANA-RPC] 📊 REAL DATA SINCE MONITORING STARTED - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
     )
 
     if (buyCount === 0 && sellCount === 0) {
-      console.log("[SOLANA-RPC] No trading activity detected in the time window")
+      console.log("[SOLANA-RPC] No new trading activity since monitoring started")
     }
   } catch (error) {
     console.error("[SOLANA-RPC] Error collecting transaction data:", error)
@@ -394,10 +403,13 @@ async function analyzeAndExecuteAutoSell() {
   try {
     const netUsdFlow = autoSellState.metrics.netUsdFlow
     const buyVolumeUsd = autoSellState.metrics.buyVolumeUsd
+    const sellVolumeUsd = autoSellState.metrics.sellVolumeUsd
     const cooldownMs = autoSellState.config.cooldownSeconds * 1000
     const currentTime = Date.now()
 
-    console.log(`[AUTO-SELL] Analysis - Net Flow: $${netUsdFlow.toFixed(2)}, Buy Volume: $${buyVolumeUsd.toFixed(2)}`)
+    console.log(
+      `[AUTO-SELL] 📊 ANALYSIS - Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)}`,
+    )
 
     if (netUsdFlow > 0 && buyVolumeUsd > 0) {
       console.log(
@@ -412,6 +424,9 @@ async function analyzeAndExecuteAutoSell() {
 
       console.log(`[AUTO-SELL] 🚀 EXECUTING IMMEDIATE SELL! Positive net flow detected.`)
 
+      const sellAmountUsd = netUsdFlow * 0.25
+      console.log(`[AUTO-SELL] 💰 Sell Amount: 25% of $${netUsdFlow.toFixed(2)} = $${sellAmountUsd.toFixed(2)}`)
+
       console.log(`[AUTO-SELL] Step 1: Updating token price...`)
       await updateTokenPrice()
       console.log(`[AUTO-SELL] Step 1 Complete: Current price = $${autoSellState.metrics.currentPriceUsd}`)
@@ -422,7 +437,6 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
 
       console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
-      const sellAmountUsd = (netUsdFlow * autoSellState.config.sellPercentageOfNetFlow) / 100
       await executeCoordinatedSell(sellAmountUsd)
       console.log(`[AUTO-SELL] Step 3 Complete: Sell execution finished`)
     } else {

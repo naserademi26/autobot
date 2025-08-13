@@ -330,8 +330,8 @@ export default function AutoSellDashboard() {
     status.metrics.lastSellTrigger > 0 ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000) : 0
 
   return (
-    <div className="max-w-7xl mx-auto p-6 space-y-6 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 min-h-screen">
-      <header className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between p-6 rounded-2xl bg-gradient-to-r from-slate-900/80 to-slate-800/80 backdrop-blur-sm border border-slate-700/50">
+    <div className="max-w-7xl mx-auto p-4 space-y-6 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 min-h-screen">
+      <header className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between p-6 rounded-2xl bg-gradient-to-r from-slate-900/90 to-slate-800/90 backdrop-blur-sm border border-slate-700/60 shadow-2xl">
         <div>
           <h1 className="text-4xl font-bold bg-gradient-to-r from-emerald-400 via-blue-400 to-purple-400 bg-clip-text text-transparent">
             🤖 Market Momentum Auto-Sell
@@ -341,7 +341,7 @@ export default function AutoSellDashboard() {
           </p>
         </div>
         <div className="flex items-center gap-4">
-          <div className="rounded-xl border border-slate-700/50 bg-slate-800/60 backdrop-blur-sm px-4 py-2.5 text-sm font-medium">
+          <div className="rounded-xl border border-slate-700/60 bg-slate-800/70 backdrop-blur-sm px-4 py-2.5 text-sm font-medium shadow-lg">
             <span className="text-slate-400">RPC: </span>
             <span className={rpcOk ? "text-emerald-400" : rpcOk === false ? "text-rose-400" : "text-amber-400"}>
               {rpcOk == null ? "Checking..." : rpcOk ? "Connected" : "Disconnected"}
@@ -349,10 +349,10 @@ export default function AutoSellDashboard() {
           </div>
           <Badge
             variant={status.isRunning ? "default" : "secondary"}
-            className={`px-4 py-2 text-sm font-semibold ${
+            className={`px-4 py-2 text-sm font-semibold shadow-lg ${
               status.isRunning
-                ? "bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse"
-                : "bg-slate-600/20 text-slate-400 border-slate-500/50"
+                ? "bg-emerald-600/30 text-emerald-300 border-emerald-500/60 animate-pulse"
+                : "bg-slate-600/30 text-slate-400 border-slate-500/60"
             }`}
           >
             {status.isRunning ? "🟢 MONITORING" : "🔴 STOPPED"}
@@ -364,10 +364,10 @@ export default function AutoSellDashboard() {
         {/* Configuration Panel */}
         <div className="lg:col-span-1 space-y-6">
           {/* Wallet Management */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-blue-500/20">
+                <div className="p-2 rounded-lg bg-blue-500/30 shadow-lg">
                   <Wallet className="w-5 h-5 text-blue-400" />
                 </div>
                 Wallet Configuration
@@ -375,20 +375,24 @@ export default function AutoSellDashboard() {
             </CardHeader>
             <CardContent className="space-y-4">
               <textarea
-                className="w-full min-h-[120px] font-mono text-xs bg-slate-800/60 border border-slate-700/50 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500/50 transition-all"
+                className="w-full min-h-[120px] font-mono text-xs bg-slate-800/70 border border-slate-700/60 rounded-xl px-4 py-3 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/60 transition-all shadow-inner"
                 placeholder="Enter wallet private keys (one per line)&#10;Supports base58 or JSON array format&#10;Example: 5Kb8kLf9CJfPg..."
                 value={vaultKeys}
                 onChange={(e) => setVaultKeys(e.target.value)}
               />
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" onClick={addVault} className="bg-blue-600 hover:bg-blue-700 text-white font-medium">
+                <Button
+                  size="sm"
+                  onClick={addVault}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-lg"
+                >
                   Add Wallets
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => setConnected([])}
-                  className="border-slate-600 text-slate-300 hover:bg-slate-800"
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800 shadow-lg"
                 >
                   Clear
                 </Button>
@@ -396,7 +400,7 @@ export default function AutoSellDashboard() {
                   size="sm"
                   variant="outline"
                   onClick={() => toggleAll(true)}
-                  className="border-slate-600 text-slate-300 hover:bg-slate-800"
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800 shadow-lg"
                 >
                   Select All
                 </Button>
@@ -405,29 +409,29 @@ export default function AutoSellDashboard() {
                   variant="outline"
                   onClick={refreshBalances}
                   disabled={balancesLoading}
-                  className="border-slate-600 text-slate-300 hover:bg-slate-800 bg-transparent"
+                  className="border-slate-600 text-slate-300 hover:bg-slate-800 bg-transparent shadow-lg"
                 >
                   <RefreshCw className={`w-4 h-4 ${balancesLoading ? "animate-spin" : ""}`} />
                 </Button>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
-                <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border border-blue-500/20 p-4 rounded-xl text-center">
+                <div className="bg-gradient-to-br from-blue-500/20 to-blue-600/20 border border-blue-500/30 p-4 rounded-xl text-center shadow-lg">
                   <div className="text-2xl font-bold text-blue-400">{connected.length}</div>
                   <div className="text-slate-400 text-sm font-medium">Wallets</div>
                 </div>
-                <div className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border border-emerald-500/20 p-4 rounded-xl text-center">
+                <div className="bg-gradient-to-br from-emerald-500/20 to-emerald-600/20 border border-emerald-500/30 p-4 rounded-xl text-center shadow-lg">
                   <div className="text-2xl font-bold text-emerald-400">{selectedCount}</div>
                   <div className="text-slate-400 text-sm font-medium">Selected</div>
                 </div>
               </div>
 
               {connected.length > 0 && (
-                <div className="max-h-48 overflow-auto border border-slate-700/50 rounded-xl p-3 bg-slate-800/30 space-y-2">
+                <div className="max-h-48 overflow-auto border border-slate-700/60 rounded-xl p-3 bg-slate-800/40 space-y-2 shadow-inner">
                   {connected.map((w) => (
                     <div
                       key={w.pubkey}
-                      className="flex items-center gap-3 py-2 px-3 rounded-lg bg-slate-800/50 hover:bg-slate-700/50 transition-colors"
+                      className="flex items-center gap-3 py-2 px-3 rounded-lg bg-slate-800/60 hover:bg-slate-700/60 transition-colors shadow-sm"
                     >
                       <input
                         type="checkbox"
@@ -449,10 +453,10 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* Token Configuration */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-purple-500/20">
+                <div className="p-2 rounded-lg bg-purple-500/30 shadow-lg">
                   <Target className="w-5 h-5 text-purple-400" />
                 </div>
                 Market Momentum Settings
@@ -465,7 +469,7 @@ export default function AutoSellDashboard() {
                   placeholder="Paste mint address or pump.fun URL"
                   value={mintRaw}
                   onChange={(e) => setMintRaw(e.target.value)}
-                  className="font-mono text-sm bg-slate-800/60 border-slate-700/50 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                  className="font-mono text-sm bg-slate-800/70 border-slate-700/60 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/60 mt-2 shadow-inner"
                 />
                 {token.name && (
                   <p className="text-sm text-emerald-400 mt-2 font-medium">
@@ -474,7 +478,7 @@ export default function AutoSellDashboard() {
                 )}
               </div>
 
-              <Separator className="bg-slate-700/50" />
+              <Separator className="bg-slate-700/60" />
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -485,7 +489,7 @@ export default function AutoSellDashboard() {
                     max="300"
                     value={config.timeWindowSeconds}
                     onChange={(e) => setConfig((prev) => ({ ...prev, timeWindowSeconds: Number(e.target.value) }))}
-                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                    className="bg-slate-800/70 border-slate-700/60 text-slate-200 focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/60 mt-2 shadow-inner"
                   />
                   <p className="text-xs text-slate-500 mt-1">Track buy/sell activity</p>
                 </div>
@@ -499,7 +503,7 @@ export default function AutoSellDashboard() {
                     onChange={(e) =>
                       setConfig((prev) => ({ ...prev, sellPercentageOfNetFlow: Number(e.target.value) }))
                     }
-                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                    className="bg-slate-800/70 border-slate-700/60 text-slate-200 focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/60 mt-2 shadow-inner"
                   />
                   <p className="text-xs text-slate-500 mt-1">% of net USD flow</p>
                 </div>
@@ -512,7 +516,7 @@ export default function AutoSellDashboard() {
                     type="number"
                     value={config.cooldownSeconds}
                     onChange={(e) => setConfig((prev) => ({ ...prev, cooldownSeconds: Number(e.target.value) }))}
-                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                    className="bg-slate-800/70 border-slate-700/60 text-slate-200 focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/60 mt-2 shadow-inner"
                   />
                 </div>
                 <div>
@@ -521,7 +525,7 @@ export default function AutoSellDashboard() {
                     type="number"
                     value={config.slippageBps}
                     onChange={(e) => setConfig((prev) => ({ ...prev, slippageBps: Number(e.target.value) }))}
-                    className="bg-slate-800/60 border-slate-700/50 text-slate-200 focus:ring-2 focus:ring-purple-500/50 focus:border-purple-500/50 mt-2"
+                    className="bg-slate-800/70 border-slate-700/60 text-slate-200 focus:ring-2 focus:ring-purple-500/60 focus:border-purple-500/60 mt-2 shadow-inner"
                   />
                   <p className="text-xs text-slate-500 mt-1">300 bps = 3%</p>
                 </div>
@@ -530,10 +534,10 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* Control Panel */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-amber-500/20">
+                <div className="p-2 rounded-lg bg-amber-500/30 shadow-lg">
                   <Settings className="w-5 h-5 text-amber-400" />
                 </div>
                 Engine Control
@@ -544,7 +548,7 @@ export default function AutoSellDashboard() {
                 <Button
                   onClick={startAutoSell}
                   disabled={loading || status.isRunning || !mint || selectedCount === 0}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 shadow-lg hover:shadow-emerald-500/25 transition-all"
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 shadow-xl hover:shadow-emerald-500/30 transition-all"
                 >
                   {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
                   Start
@@ -553,7 +557,7 @@ export default function AutoSellDashboard() {
                   onClick={stopAutoSell}
                   disabled={loading || !status.isRunning}
                   variant="destructive"
-                  className="bg-rose-600 hover:bg-rose-700 text-white font-semibold py-3 shadow-lg hover:shadow-rose-500/25 transition-all"
+                  className="bg-rose-600 hover:bg-rose-700 text-white font-semibold py-3 shadow-xl hover:shadow-rose-500/30 transition-all"
                 >
                   {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Pause className="w-4 h-4" />}
                   Stop
@@ -561,7 +565,7 @@ export default function AutoSellDashboard() {
               </div>
 
               {status.config && (
-                <div className="text-xs text-slate-400 space-y-2 p-3 bg-slate-800/30 rounded-lg border border-slate-700/30">
+                <div className="text-xs text-slate-400 space-y-2 p-3 bg-slate-800/40 rounded-lg border border-slate-700/40 shadow-inner">
                   <div className="flex justify-between">
                     <span>Window:</span>
                     <span className="text-slate-300">{status.config.timeWindowSeconds}s</span>
@@ -574,8 +578,8 @@ export default function AutoSellDashboard() {
                     <span>Cooldown:</span>
                     <span className="text-slate-300">{status.config.cooldownSeconds}s</span>
                   </div>
-                  <div className="text-amber-400 text-center font-medium mt-2 pt-2 border-t border-slate-700/50">
-                    Triggers on positive net flow only
+                  <div className="text-emerald-400 text-center font-medium mt-2 pt-2 border-t border-slate-700/50">
+                    Triggers when Net Flow &gt; $0 (Buy Volume - Sell Volume)
                   </div>
                 </div>
               )}
@@ -587,7 +591,7 @@ export default function AutoSellDashboard() {
         <div className="lg:col-span-2 space-y-6">
           {/* Market Metrics Cards */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Card className="bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border-emerald-500/30 shadow-lg hover:shadow-emerald-500/20 transition-all">
+            <Card className="bg-gradient-to-br from-emerald-500/20 to-emerald-600/20 border-emerald-500/40 shadow-xl hover:shadow-emerald-500/30 transition-all">
               <CardContent className="p-6 text-center">
                 <TrendingUp className="w-8 h-8 mx-auto mb-3 text-emerald-400" />
                 <div className="text-3xl font-bold text-emerald-400">${status.metrics.buyVolumeUsd.toFixed(0)}</div>
@@ -596,7 +600,7 @@ export default function AutoSellDashboard() {
               </CardContent>
             </Card>
 
-            <Card className="bg-gradient-to-br from-rose-500/10 to-rose-600/10 border-rose-500/30 shadow-lg hover:shadow-rose-500/20 transition-all">
+            <Card className="bg-gradient-to-br from-rose-500/20 to-rose-600/20 border-rose-500/40 shadow-xl hover:shadow-rose-500/30 transition-all">
               <CardContent className="p-6 text-center">
                 <TrendingDown className="w-8 h-8 mx-auto mb-3 text-rose-400" />
                 <div className="text-3xl font-bold text-rose-400">${status.metrics.sellVolumeUsd.toFixed(0)}</div>
@@ -608,8 +612,8 @@ export default function AutoSellDashboard() {
             <Card
               className={`${
                 status.metrics.netUsdFlow >= 0
-                  ? "bg-gradient-to-br from-emerald-500/10 to-emerald-600/10 border-emerald-500/30 shadow-lg hover:shadow-emerald-500/20"
-                  : "bg-gradient-to-br from-rose-500/10 to-rose-600/10 border-rose-500/30 shadow-lg hover:shadow-rose-500/20"
+                  ? "bg-gradient-to-br from-emerald-500/20 to-emerald-600/20 border-emerald-500/40 shadow-xl hover:shadow-emerald-500/30"
+                  : "bg-gradient-to-br from-rose-500/20 to-rose-600/20 border-rose-500/40 shadow-xl hover:shadow-rose-500/30"
               } transition-all`}
             >
               <CardContent className="p-6 text-center">
@@ -632,7 +636,7 @@ export default function AutoSellDashboard() {
               </CardContent>
             </Card>
 
-            <Card className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border-blue-500/30 shadow-lg hover:shadow-blue-500/20 transition-all">
+            <Card className="bg-gradient-to-br from-blue-500/20 to-blue-600/20 border-blue-500/40 shadow-xl hover:shadow-blue-500/30 transition-all">
               <CardContent className="p-6 text-center">
                 <DollarSign className="w-8 h-8 mx-auto mb-3 text-blue-400" />
                 <div className="text-3xl font-bold text-blue-400">${status.metrics.currentPriceUsd.toFixed(6)}</div>
@@ -643,10 +647,10 @@ export default function AutoSellDashboard() {
           </div>
 
           {/* Market Activity Monitor */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-green-500/20">
+                <div className="p-2 rounded-lg bg-green-500/30 shadow-lg">
                   <Activity className="w-5 h-5 text-green-400" />
                 </div>
                 Market Activity Monitor
@@ -655,19 +659,19 @@ export default function AutoSellDashboard() {
             <CardContent>
               <div className="grid grid-cols-2 gap-8">
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                  <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Buy Pressure:</span>
                     <span className="text-emerald-400 font-mono font-bold text-lg">
                       ${status.metrics.buyVolumeUsd.toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                  <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Sell Pressure:</span>
                     <span className="text-rose-400 font-mono font-bold text-lg">
                       ${status.metrics.sellVolumeUsd.toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                  <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Net Flow:</span>
                     <span
                       className={`font-mono font-bold text-lg ${status.metrics.netUsdFlow >= 0 ? "text-emerald-400" : "text-rose-400"}`}
@@ -677,13 +681,13 @@ export default function AutoSellDashboard() {
                   </div>
                 </div>
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                  <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Sell Amount:</span>
                     <span className="text-blue-400 font-mono font-bold text-lg">
                       ${Math.max(0, (status.metrics.netUsdFlow * config.sellPercentageOfNetFlow) / 100).toFixed(2)}
                     </span>
                   </div>
-                  <div className="flex justify-between items-center p-3 bg-slate-800/30 rounded-lg">
+                  <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Last Sell:</span>
                     <span className="text-slate-300 font-mono font-bold text-lg">
                       {status.metrics.lastSellTrigger > 0 ? `${timeSinceLastSell}s ago` : "Never"}
@@ -693,7 +697,7 @@ export default function AutoSellDashboard() {
               </div>
 
               {status.metrics.netUsdFlow > 0 && status.metrics.buyVolumeUsd > 0 && (
-                <div className="mt-6 p-4 bg-gradient-to-r from-emerald-500/10 to-green-500/10 border border-emerald-500/30 rounded-xl shadow-lg">
+                <div className="mt-6 p-4 bg-gradient-to-r from-emerald-500/20 to-green-500/20 border border-emerald-500/40 rounded-xl shadow-xl">
                   <div className="flex items-center gap-3 text-emerald-400 mb-2">
                     <TrendingUp className="w-5 h-5" />
                     <span className="font-bold text-lg">SELL TRIGGER ACTIVE</span>
@@ -709,10 +713,10 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* Transaction History */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-indigo-500/20">
+                <div className="p-2 rounded-lg bg-indigo-500/30 shadow-lg">
                   <BarChart3 className="w-5 h-5 text-indigo-400" />
                 </div>
                 Transaction History
@@ -728,10 +732,10 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* Wallet Status */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-cyan-500/20">
+                <div className="p-2 rounded-lg bg-cyan-500/30 shadow-lg">
                   <Wallet className="w-5 h-5 text-cyan-400" />
                 </div>
                 Wallet Status
@@ -749,7 +753,7 @@ export default function AutoSellDashboard() {
                   {status.walletStatus.map((wallet, idx) => (
                     <div
                       key={idx}
-                      className="p-4 bg-slate-800/40 rounded-xl border border-slate-700/30 hover:bg-slate-800/60 transition-colors"
+                      className="p-4 bg-slate-800/50 rounded-xl border border-slate-700/40 hover:bg-slate-800/70 transition-colors shadow-lg"
                     >
                       <div className="flex items-center justify-between mb-3">
                         <span className="font-mono text-sm text-slate-300 font-medium">
@@ -759,8 +763,8 @@ export default function AutoSellDashboard() {
                           variant={wallet.cooldownUntil > Date.now() ? "secondary" : "default"}
                           className={
                             wallet.cooldownUntil > Date.now()
-                              ? "bg-amber-500/20 text-amber-400 border-amber-500/30"
-                              : "bg-emerald-500/20 text-emerald-400 border-emerald-500/30"
+                              ? "bg-amber-500/30 text-amber-400 border-amber-500/40 shadow-lg"
+                              : "bg-emerald-500/30 text-emerald-400 border-emerald-500/40 shadow-lg"
                           }
                         >
                           {wallet.cooldownUntil > Date.now() ? (
@@ -791,19 +795,19 @@ export default function AutoSellDashboard() {
           </Card>
 
           {/* System Log */}
-          <Card className="bg-slate-900/60 backdrop-blur-sm border-slate-700/50 shadow-xl">
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
-                <div className="p-2 rounded-lg bg-slate-500/20">
+                <div className="p-2 rounded-lg bg-slate-500/30 shadow-lg">
                   <Activity className="w-5 h-5 text-slate-400" />
                 </div>
                 System Log
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <pre className="text-xs whitespace-pre-wrap bg-slate-950/60 border border-slate-800/50 p-4 rounded-xl max-h-48 overflow-auto font-mono text-slate-300 leading-relaxed">
+              <pre className="text-xs whitespace-pre-wrap bg-slate-950/70 border border-slate-800/60 p-4 rounded-xl max-h-48 overflow-auto font-mono text-slate-300 leading-relaxed shadow-inner">
                 {log ||
-                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when net flow > $0.`}
+                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when Net Flow &gt; $0 (Buy Volume - Sell Volume).`}
               </pre>
             </CardContent>
           </Card>
