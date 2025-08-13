@@ -179,7 +179,22 @@ export default function AutoSellDashboard() {
         const res = await fetch("/api/auto-sell/status")
         if (res.ok) {
           const data = await res.json()
-          setStatus(data)
+          setStatus({
+            ...data,
+            walletStatus: Array.isArray(data.walletStatus) ? data.walletStatus : [],
+            metrics: {
+              ...data.metrics,
+              totalBought: data.metrics?.totalBought || 0,
+              totalSold: data.metrics?.totalSold || 0,
+              currentPrice: data.metrics?.currentPrice || 0,
+              currentPriceUsd: data.metrics?.currentPriceUsd || 0,
+              solPriceUsd: data.metrics?.solPriceUsd || 100,
+              netUsdFlow: data.metrics?.netUsdFlow || 0,
+              buyVolumeUsd: data.metrics?.buyVolumeUsd || 0,
+              sellVolumeUsd: data.metrics?.sellVolumeUsd || 0,
+              lastSellTrigger: data.metrics?.lastSellTrigger || 0,
+            },
+          })
           setError(null)
         } else {
           console.error("Status fetch failed:", res.status, res.statusText)
@@ -219,7 +234,8 @@ export default function AutoSellDashboard() {
       }
 
       const map = new Map<string, VaultEntry>()
-      for (const w of [...connected, ...items]) map.set(w.pubkey, w)
+      const existingConnected = Array.isArray(connected) ? connected : []
+      for (const w of [...existingConnected, ...items]) map.set(w.pubkey, w)
       const next = Array.from(map.values()).slice(0, 120)
       setConnected(next)
 
@@ -286,7 +302,8 @@ export default function AutoSellDashboard() {
     }
 
     const cur = ++refreshId.current
-    const pubkeys = connected.map((w) => w.pubkey)
+    const connectedWallets = Array.isArray(connected) ? connected : []
+    const pubkeys = connectedWallets.map((w) => w.pubkey)
     if (pubkeys.length === 0) {
       setBalances({})
       return
@@ -335,7 +352,9 @@ export default function AutoSellDashboard() {
     setLog(`🚀 Starting market momentum auto-sell engine...`)
 
     try {
-      const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
+      const connectedWallets = Array.isArray(connected) ? connected : []
+      const selectedWallets = selected || {}
+      const keys = connectedWallets.filter((w) => selectedWallets[w.pubkey] && w.hasSecret).map((w) => w.sk!)
 
       if (keys.length === 0) {
         throw new Error("No wallets selected with private keys")
@@ -407,22 +426,30 @@ export default function AutoSellDashboard() {
 
   function toggleAll(v: boolean) {
     const s: Record<string, boolean> = {}
-    connected.forEach((w) => (s[w.pubkey] = v))
+    const connectedWallets = Array.isArray(connected) ? connected : []
+    connectedWallets.forEach((w) => (s[w.pubkey] = v))
     setSelected(s)
   }
 
-  const selectedCount = useMemo(() => Object.values(selected).filter(Boolean).length, [selected])
-  const totalSelectedSol = useMemo(
-    () =>
-      connected.reduce((acc, w) => {
-        if (!selected[w.pubkey]) return acc
-        return acc + (balances[w.pubkey] ?? 0)
-      }, 0),
-    [connected, selected, balances],
-  )
+  const selectedCount = useMemo(() => {
+    const selectedObj = selected || {}
+    return Object.values(selectedObj).filter(Boolean).length
+  }, [selected])
+
+  const totalSelectedSol = useMemo(() => {
+    const connectedWallets = Array.isArray(connected) ? connected : []
+    const selectedObj = selected || {}
+    const balancesObj = balances || {}
+    return connectedWallets.reduce((acc, w) => {
+      if (!selectedObj[w.pubkey]) return acc
+      return acc + (balancesObj[w.pubkey] ?? 0)
+    }, 0)
+  }, [connected, selected, balances])
 
   const timeSinceLastSell =
-    status.metrics.lastSellTrigger > 0 ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000) : 0
+    status?.metrics?.lastSellTrigger && status.metrics.lastSellTrigger > 0
+      ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000)
+      : 0
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -527,7 +554,7 @@ export default function AutoSellDashboard() {
                   </div>
                 </div>
 
-                {connected.length > 0 && (
+                {Array.isArray(connected) && connected.length > 0 && (
                   <div className="max-h-48 overflow-auto border border-slate-600 rounded-xl p-3 bg-slate-900/50">
                     <div className="space-y-2">
                       {connected.map((w) => (
@@ -537,7 +564,7 @@ export default function AutoSellDashboard() {
                         >
                           <input
                             type="checkbox"
-                            checked={!!selected[w.pubkey]}
+                            checked={!!(selected && selected[w.pubkey])}
                             onChange={(e) => setSelected({ ...selected, [w.pubkey]: e.target.checked })}
                             className="w-4 h-4 rounded border-slate-500 text-blue-600 focus:ring-blue-500"
                           />
@@ -545,7 +572,7 @@ export default function AutoSellDashboard() {
                             {w.pubkey.slice(0, 8)}...{w.pubkey.slice(-6)}
                           </span>
                           <span className="text-sm text-slate-300 font-medium">
-                            {balances[w.pubkey]?.toFixed(3) || "0.000"} SOL
+                            {balances && balances[w.pubkey] ? balances[w.pubkey].toFixed(3) : "0.000"} SOL
                           </span>
                         </div>
                       ))}
@@ -836,7 +863,7 @@ export default function AutoSellDashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {status.walletStatus.length === 0 ? (
+                {!Array.isArray(status?.walletStatus) || status.walletStatus.length === 0 ? (
                   <div className="text-center py-12 text-slate-400">
                     <Wallet className="w-16 h-16 mx-auto mb-4 opacity-50" />
                     <p className="text-lg font-medium">No wallets configured</p>
@@ -851,7 +878,7 @@ export default function AutoSellDashboard() {
                       >
                         <div className="flex items-center justify-between mb-3">
                           <span className="font-mono text-sm text-slate-200 font-medium">
-                            {wallet.publicKey.slice(0, 12)}...{wallet.publicKey.slice(-6)}
+                            {wallet.publicKey?.slice(0, 12)}...{wallet.publicKey?.slice(-6)}
                           </span>
                           <Badge
                             variant={wallet.cooldownUntil > Date.now() ? "secondary" : "default"}
@@ -874,11 +901,15 @@ export default function AutoSellDashboard() {
                         <div className="grid grid-cols-2 gap-6">
                           <div>
                             <span className="text-slate-400 text-sm">SOL Balance: </span>
-                            <span className="text-white font-mono font-semibold">{wallet.balance.toFixed(4)}</span>
+                            <span className="text-white font-mono font-semibold">
+                              {(wallet.balance || 0).toFixed(4)}
+                            </span>
                           </div>
                           <div>
                             <span className="text-slate-400 text-sm">Token Balance: </span>
-                            <span className="text-white font-mono font-semibold">{wallet.tokenBalance.toFixed(2)}</span>
+                            <span className="text-white font-mono font-semibold">
+                              {(wallet.tokenBalance || 0).toFixed(2)}
+                            </span>
                           </div>
                         </div>
                       </div>

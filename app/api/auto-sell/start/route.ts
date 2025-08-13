@@ -16,6 +16,8 @@ const autoSellState = {
     buyVolumeUsd: 0, // Total buy volume in USD in time window
     sellVolumeUsd: 0, // Total sell volume in USD in time window
     lastSellTrigger: 0, // Timestamp of last sell trigger
+    analysisWindowStart: 0, // When current analysis window started
+    windowCompleted: false, // Whether current window is complete and ready for analysis
   },
   intervals: [] as NodeJS.Timeout[],
   lastError: null as string | null,
@@ -173,6 +175,10 @@ async function startAutoSellEngine() {
   })
   autoSellState.intervals = []
 
+  autoSellState.metrics.analysisWindowStart = Date.now()
+  autoSellState.metrics.windowCompleted = false
+  console.log(`[ENGINE] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
+
   // Market monitoring interval (every 10 seconds)
   const marketMonitorInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
@@ -194,12 +200,11 @@ async function startAutoSellEngine() {
     }
   }, 10000)
 
-  // Auto-sell execution interval (every 15 seconds)
   const executionInterval = setInterval(async () => {
     if (!autoSellState.isRunning) return
 
     try {
-      await executeAutoSell()
+      await checkAndExecuteAutoSell()
     } catch (error: any) {
       autoSellState.errorCount++
       autoSellState.lastError = error?.message || "Auto-sell execution error"
@@ -210,7 +215,7 @@ async function startAutoSellEngine() {
         await stopAutoSellEngine()
       }
     }
-  }, 15000)
+  }, 30000) // Check every 30 seconds instead of 15
 
   // Wallet balance update interval (every 30 seconds)
   const balanceInterval = setInterval(async () => {
@@ -375,36 +380,59 @@ async function monitorMarketActivity() {
   }
 }
 
+async function checkAndExecuteAutoSell() {
+  try {
+    const currentTime = Date.now()
+    const windowDurationMs = autoSellState.config.timeWindowSeconds * 1000
+    const timeSinceWindowStart = currentTime - autoSellState.metrics.analysisWindowStart
+
+    // Check if analysis window is complete
+    if (timeSinceWindowStart < windowDurationMs) {
+      const remainingSeconds = Math.ceil((windowDurationMs - timeSinceWindowStart) / 1000)
+      console.log(`[WINDOW] Analysis window in progress... ${remainingSeconds}s remaining`)
+      return
+    }
+
+    // Window is complete, check if we should sell
+    if (!autoSellState.metrics.windowCompleted) {
+      autoSellState.metrics.windowCompleted = true
+      console.log(`[WINDOW] Analysis window completed! Analyzing ${autoSellState.config.timeWindowSeconds}s of data...`)
+
+      const netUsdFlow = autoSellState.metrics.netUsdFlow
+      const minNetFlowUsd = autoSellState.config.minNetFlowUsd
+
+      console.log(
+        `[ANALYSIS] Window Results: Buy Volume: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell Volume: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)}`,
+      )
+
+      if (netUsdFlow > minNetFlowUsd) {
+        console.log(
+          `[TRIGGER] Positive net flow $${netUsdFlow.toFixed(2)} > threshold $${minNetFlowUsd} - EXECUTING SELL`,
+        )
+        await executeAutoSell()
+      } else {
+        console.log(`[NO TRIGGER] Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd} - No sell executed`)
+      }
+
+      console.log(`[WINDOW] Starting new ${autoSellState.config.timeWindowSeconds}s analysis window`)
+      autoSellState.metrics.analysisWindowStart = currentTime
+      autoSellState.metrics.windowCompleted = false
+      autoSellState.marketTrades = [] // Clear old trades for new window
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
+    }
+  } catch (error: any) {
+    console.error("Window check error:", error)
+    throw error
+  }
+}
+
 async function executeAutoSell() {
   try {
     const netUsdFlow = autoSellState.metrics.netUsdFlow
-    const minNetFlowUsd = autoSellState.config.minNetFlowUsd
-    const cooldownMs = autoSellState.config.cooldownSeconds * 1000
-    const currentTime = Date.now()
-
-    if (!isFinite(netUsdFlow) || !isFinite(minNetFlowUsd)) {
-      console.log("[AUTO-SELL] Invalid numeric values, skipping")
-      return
-    }
-
-    // Check if we're in cooldown period
-    if (currentTime - autoSellState.metrics.lastSellTrigger < cooldownMs) {
-      const remainingCooldown = Math.ceil((cooldownMs - (currentTime - autoSellState.metrics.lastSellTrigger)) / 1000)
-      console.log(`[AUTO-SELL] In cooldown period, ${remainingCooldown}s remaining`)
-      return
-    }
-
-    // Check if net flow is positive and above threshold
-    if (netUsdFlow <= minNetFlowUsd) {
-      console.log(`[AUTO-SELL] Net flow $${netUsdFlow.toFixed(2)} <= threshold $${minNetFlowUsd}, no sell triggered`)
-      return
-    }
-
-    console.log(`[AUTO-SELL] Positive net flow detected: $${netUsdFlow.toFixed(2)} > $${minNetFlowUsd}`)
-
-    // Calculate USD amount to sell (percentage of net flow)
     const sellPercentage = autoSellState.config.sellPercentageOfNetFlow
-    const usdAmountToSell = (netUsdFlow * sellPercentage) / 100
+    const exactUsdAmountToSell = (netUsdFlow * sellPercentage) / 100 // Exact 25% of net USD flow
     const currentPriceUsd = autoSellState.metrics.currentPriceUsd
 
     if (!isFinite(currentPriceUsd) || currentPriceUsd <= 0) {
@@ -412,82 +440,113 @@ async function executeAutoSell() {
       return
     }
 
-    if (!isFinite(usdAmountToSell) || usdAmountToSell <= 0) {
+    if (!isFinite(exactUsdAmountToSell) || exactUsdAmountToSell <= 0) {
       console.log("[AUTO-SELL] Invalid sell amount calculated, skipping")
       return
     }
 
-    // Convert USD amount to token amount
-    const tokensToSell = usdAmountToSell / currentPriceUsd
+    // Convert USD amount to equivalent token amount based on current price
+    const exactTokensToSell = exactUsdAmountToSell / currentPriceUsd
 
     console.log(
-      `[AUTO-SELL] Selling ${sellPercentage}% of net flow: $${usdAmountToSell.toFixed(2)} (${tokensToSell.toFixed(4)} tokens)`,
+      `[AUTO-SELL] CALCULATION: Net USD Flow: $${netUsdFlow.toFixed(2)} | ${sellPercentage}% = $${exactUsdAmountToSell.toFixed(2)} | Tokens to sell: ${exactTokensToSell.toFixed(6)}`,
     )
 
-    // Get wallets with tokens and distribute the sell amount
     const walletsWithTokens = autoSellState.wallets.filter(
-      (wallet) => wallet && typeof wallet.tokenBalance === "number" && wallet.tokenBalance > 0,
+      (wallet) =>
+        wallet &&
+        typeof wallet.tokenBalance === "number" &&
+        wallet.tokenBalance > 0 &&
+        Date.now() >= wallet.cooldownUntil,
     )
 
     if (walletsWithTokens.length === 0) {
-      console.log("[AUTO-SELL] No wallets have tokens to sell")
+      console.log("[AUTO-SELL] No wallets available with tokens (all in cooldown or no tokens)")
       return
     }
 
     const totalTokensHeld = walletsWithTokens.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
 
-    if (!isFinite(totalTokensHeld) || totalTokensHeld < tokensToSell) {
+    if (!isFinite(totalTokensHeld) || totalTokensHeld < exactTokensToSell) {
       console.log(
-        `[AUTO-SELL] Not enough tokens held (${totalTokensHeld.toFixed(4)}) to sell required amount (${tokensToSell.toFixed(4)})`,
+        `[AUTO-SELL] Not enough tokens held (${totalTokensHeld.toFixed(6)}) to sell required amount (${exactTokensToSell.toFixed(6)})`,
       )
       return
     }
 
-    // Distribute sell amount proportionally across wallets
-    let totalSold = 0
     const sellPromises = []
+    let totalTokensToSell = 0
 
     for (const wallet of walletsWithTokens) {
-      if (!wallet || Date.now() < wallet.cooldownUntil) continue
-
+      // Calculate proportional amount for this wallet
       const walletProportion = wallet.tokenBalance / totalTokensHeld
-      const walletSellAmount = tokensToSell * walletProportion
+      const walletTokensToSell = exactTokensToSell * walletProportion
 
-      if (!isFinite(walletSellAmount) || walletSellAmount < 0.000001) continue // Minimum sell amount
+      // Only sell if amount is meaningful (> 0.000001 tokens)
+      if (walletTokensToSell > 0.000001) {
+        totalTokensToSell += walletTokensToSell
 
-      sellPromises.push(
-        executeSell(wallet, walletSellAmount)
+        const sellPromise = executeSell(wallet, walletTokensToSell)
           .then((signature) => {
-            wallet.cooldownUntil = Date.now() + 30000 // 30 second wallet cooldown
-            totalSold += walletSellAmount
+            const actualUsdSold = walletTokensToSell * currentPriceUsd
+            const actualSolReceived = walletTokensToSell * autoSellState.metrics.currentPrice
 
-            const estimatedSolReceived = walletSellAmount * autoSellState.metrics.currentPrice
-            const estimatedUsdValue = walletSellAmount * currentPriceUsd
+            // Set cooldown for this wallet
+            wallet.cooldownUntil = Date.now() + autoSellState.config.timeWindowSeconds * 1000
 
             console.log(
-              `[AUTO-SELL] ${wallet.name} sold ${walletSellAmount.toFixed(4)} tokens for ~${estimatedSolReceived.toFixed(4)} SOL (~$${estimatedUsdValue.toFixed(2)} USD), sig: ${signature}`,
+              `[AUTO-SELL] ${wallet.name} sold ${walletTokensToSell.toFixed(6)} tokens for ~${actualSolReceived.toFixed(4)} SOL (~$${actualUsdSold.toFixed(2)} USD), sig: ${signature}`,
             )
-            return { success: true, amount: walletSellAmount }
+
+            return {
+              wallet: wallet.name,
+              tokens: walletTokensToSell,
+              usd: actualUsdSold,
+              sol: actualSolReceived,
+              signature,
+            }
           })
           .catch((error) => {
             console.error(`[AUTO-SELL ERROR] ${wallet.name}:`, error)
-            return { success: false, error: error?.message }
-          }),
-      )
-    }
+            return {
+              wallet: wallet.name,
+              error: error.message,
+            }
+          })
 
-    if (sellPromises.length > 0) {
-      const results = await Promise.allSettled(sellPromises)
-      const successfulSells = results.filter((result) => result.status === "fulfilled" && result.value.success)
-
-      if (successfulSells.length > 0) {
-        autoSellState.metrics.lastSellTrigger = currentTime
-        autoSellState.metrics.totalSold += totalSold
-        console.log(
-          `[AUTO-SELL] Total sold: ${totalSold.toFixed(4)} tokens worth ~$${(totalSold * currentPriceUsd).toFixed(2)} USD (${successfulSells.length}/${sellPromises.length} wallets succeeded)`,
-        )
+        sellPromises.push(sellPromise)
       }
     }
+
+    if (sellPromises.length === 0) {
+      console.log("[AUTO-SELL] No meaningful sell amounts calculated for any wallet")
+      return
+    }
+
+    console.log(`[AUTO-SELL] Executing sells across ${sellPromises.length} wallets simultaneously...`)
+    const results = await Promise.all(sellPromises)
+
+    // Calculate totals and update metrics
+    let totalUsdSold = 0
+    let totalTokensSold = 0
+    let successfulSells = 0
+
+    results.forEach((result) => {
+      if (result.signature) {
+        totalUsdSold += result.usd
+        totalTokensSold += result.tokens
+        successfulSells++
+      }
+    })
+
+    autoSellState.metrics.lastSellTrigger = Date.now()
+    autoSellState.metrics.totalSold += totalTokensSold
+
+    console.log(`[AUTO-SELL] SUMMARY: ${successfulSells}/${sellPromises.length} wallets sold successfully`)
+    console.log(`[AUTO-SELL] TOTAL: ${totalTokensSold.toFixed(6)} tokens for ~$${totalUsdSold.toFixed(2)} USD`)
+    console.log(
+      `[AUTO-SELL] TARGET: $${exactUsdAmountToSell.toFixed(2)} | ACTUAL: $${totalUsdSold.toFixed(2)} | DIFFERENCE: $${(totalUsdSold - exactUsdAmountToSell).toFixed(2)}`,
+    )
   } catch (error: any) {
     console.error("Auto-sell execution error:", error)
     throw error
@@ -558,6 +617,8 @@ async function executeSell(wallet: any, amount: number) {
 
   const axios = await import("axios")
   const { Connection, VersionedTransaction } = await import("@solana/web3.js")
+  const { getMint } = await import("@solana/spl-token")
+  const { PublicKey } = await import("@solana/web3.js")
 
   const connection = new Connection(
     process.env.NEXT_PUBLIC_RPC_URL ||
@@ -567,11 +628,7 @@ async function executeSell(wallet: any, amount: number) {
   )
 
   try {
-    // Get token decimals with timeout
-    const { getMint } = await import("@solana/spl-token")
-    const { PublicKey } = await import("@solana/web3.js")
-
-    const mintInfo = await connection.getMint(new PublicKey(autoSellState.config.mint))
+    const mintInfo = await getMint(connection, new PublicKey(autoSellState.config.mint))
     const decimals = mintInfo.decimals
 
     // Convert to atoms with validation
@@ -626,7 +683,6 @@ async function executeSell(wallet: any, amount: number) {
       try {
         const serializedTx = Buffer.from(tx.serialize()).toString("base64")
 
-        // Use the correct bloXroute endpoint with HTTPS
         const bloxrouteUrl = process.env.BLOXROUTE_SUBMIT_URL || "https://ny.solana.dex.blxrbdn.com"
 
         const response = await axios.default.post(
@@ -639,7 +695,7 @@ async function executeSell(wallet: any, amount: number) {
           },
           {
             headers: {
-              Authorization: auth,
+              Authorization: `Bearer ${auth}`,
               "Content-Type": "application/json",
               "User-Agent": "AutoSellBot/1.0",
             },
@@ -657,6 +713,7 @@ async function executeSell(wallet: any, amount: number) {
         console.error("bloXroute submission failed:", {
           message: error.message,
           status: error.response?.status,
+          statusText: error.response?.statusText,
           data: error.response?.data,
         })
         console.log("Falling back to RPC submission...")
