@@ -296,15 +296,14 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
 
     const preTokenBalances = tx.meta.preTokenBalances || []
     const postTokenBalances = tx.meta.postTokenBalances || []
-    const preBalances = tx.meta.preBalances || []
-    const postBalances = tx.meta.postBalances || []
 
-    let netTokenChange = 0
-    let netSolChange = 0
+    // Calculate net token flow across ALL accounts in the transaction
+    let netTokenFlow = 0
+    let netSolFlow = 0
     let hasTokenActivity = false
 
     // Track all token balance changes for our mint
-    const tokenChanges = new Map()
+    const tokenBalanceChanges = new Map()
 
     // Process existing token accounts
     for (const preBalance of preTokenBalances) {
@@ -317,11 +316,13 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
           const postAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
           const change = postAmount - preAmount
 
-          if (Math.abs(change) > 0.001) {
-            tokenChanges.set(preBalance.accountIndex, change)
-            netTokenChange += change
-            hasTokenActivity = true
-          }
+          tokenBalanceChanges.set(preBalance.accountIndex, change)
+          netTokenFlow += change
+          hasTokenActivity = true
+
+          console.log(
+            `[TX-ANALYSIS] Account ${preBalance.accountIndex}: ${change > 0 ? "+" : ""}${change.toFixed(4)} tokens`,
+          )
         }
       }
     }
@@ -333,87 +334,100 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
           (pre: any) => pre.accountIndex === postBalance.accountIndex && pre.mint === tokenMint,
         )
         if (!preBalance) {
-          const amount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
-          if (amount > 0.001) {
-            tokenChanges.set(postBalance.accountIndex, amount)
-            netTokenChange += amount
-            hasTokenActivity = true
-          }
+          const newAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
+          tokenBalanceChanges.set(postBalance.accountIndex, newAmount)
+          netTokenFlow += newAmount
+          hasTokenActivity = true
+
+          console.log(
+            `[TX-ANALYSIS] New Account ${postBalance.accountIndex}: +${newAmount.toFixed(4)} tokens (first buy)`,
+          )
         }
       }
     }
 
-    // Calculate SOL changes for accounts involved in token activity
-    if (hasTokenActivity) {
-      tokenChanges.forEach((tokenChange, accountIndex) => {
-        const solPre = preBalances[accountIndex] || 0
-        const solPost = postBalances[accountIndex] || 0
-        const solChange = (solPost - solPre) / 1e9
+    // Calculate net SOL flow for cross-validation
+    if (tx.meta.preBalances && tx.meta.postBalances) {
+      const solBalanceChanges = tx.meta.postBalances.map(
+        (post: number, index: number) => post - tx.meta.preBalances[index],
+      )
 
-        // Only count significant SOL changes
-        if (Math.abs(solChange) > 0.001) {
-          netSolChange += solChange
+      // Find the largest SOL movement (excluding fees)
+      let maxSolChange = 0
+      solBalanceChanges.forEach((change: number, index: number) => {
+        if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 10000) {
+          // > 0.00001 SOL
+          maxSolChange = change
         }
       })
+
+      netSolFlow = maxSolChange / 1e9
     }
 
-    const solPriceUsd = autoSellState.metrics.solPriceUsd || 100
-    let usdAmount = 0
+    if (!hasTokenActivity || Math.abs(netTokenFlow) < 0.001) {
+      return null
+    }
+
+    // Determine transaction type based on net token flow
     let type = ""
+    let usdAmount = 0
 
-    if (hasTokenActivity && Math.abs(netTokenChange) >= 0.001) {
-      // Primary classification: based on net token flow
-      // Positive net token change = more tokens received overall = BUY
-      // Negative net token change = more tokens sent overall = SELL
-      type = netTokenChange > 0 ? "buy" : "sell"
-
-      // Cross-validate with SOL flow (should be opposite direction)
-      const expectedSolFlow = netTokenChange > 0 ? "negative" : "positive"
-      const actualSolFlow = netSolChange < 0 ? "negative" : "positive"
-
-      if (expectedSolFlow !== actualSolFlow && Math.abs(netSolChange) > 0.01) {
-        console.log(
-          `[ANALYSIS] Warning: Token flow (${type}) doesn't match SOL flow direction for ${tx.transaction.signatures[0].substring(0, 8)}`,
-        )
-      }
-
-      // Calculate USD value from token amount
-      const tokenPriceUsd = autoSellState.metrics.currentPriceUsd || 0.000001
-      usdAmount = Math.abs(netTokenChange) * tokenPriceUsd
-
-      // If token price is unreliable, use SOL value as backup
-      if (tokenPriceUsd < 0.0000001 && Math.abs(netSolChange) > 0.001) {
-        usdAmount = Math.abs(netSolChange) * solPriceUsd
-      }
-    } else if (Math.abs(netSolChange) >= 0.001) {
-      // Fallback: classify based on SOL flow only
-      // Negative SOL change = spending SOL = buying tokens
-      // Positive SOL change = receiving SOL = selling tokens
-      type = netSolChange < 0 ? "buy" : "sell"
-      usdAmount = Math.abs(netSolChange) * solPriceUsd
+    if (netTokenFlow > 0.001) {
+      // Net positive token flow = someone received tokens = BUY
+      type = "buy"
+      console.log(`[TX-ANALYSIS] ✅ CLASSIFIED AS BUY: Net token flow +${netTokenFlow.toFixed(4)} tokens`)
+    } else if (netTokenFlow < -0.001) {
+      // Net negative token flow = someone sent tokens away = SELL
+      type = "sell"
+      console.log(`[TX-ANALYSIS] ❌ CLASSIFIED AS SELL: Net token flow ${netTokenFlow.toFixed(4)} tokens`)
     } else {
       return null
     }
 
+    // Cross-validate with SOL flow direction
+    if (Math.abs(netSolFlow) > 0.00001) {
+      const expectedSolFlow = type === "buy" ? "negative" : "positive"
+      const actualSolFlow = netSolFlow < 0 ? "negative" : "positive"
+
+      if (expectedSolFlow !== actualSolFlow) {
+        console.log(
+          `[TX-ANALYSIS] ⚠️ SOL flow mismatch: Expected ${expectedSolFlow}, got ${actualSolFlow} (${netSolFlow.toFixed(6)} SOL)`,
+        )
+      } else {
+        console.log(`[TX-ANALYSIS] ✅ SOL flow confirms ${type}: ${netSolFlow.toFixed(6)} SOL`)
+      }
+    }
+
+    // Calculate USD value
+    const solPriceUsd = autoSellState.metrics.solPriceUsd || 100
+    const tokenPriceUsd = autoSellState.metrics.currentPriceUsd || 0.000001
+
+    if (Math.abs(netSolFlow) > 0.00001) {
+      // Use SOL flow for USD calculation (more reliable)
+      usdAmount = Math.abs(netSolFlow) * solPriceUsd
+    } else {
+      // Fall back to token amount estimation
+      usdAmount = Math.abs(netTokenFlow) * tokenPriceUsd
+    }
+
     // Only process transactions with meaningful USD value
-    if (usdAmount < 0.5) {
+    if (usdAmount < 0.1) {
+      console.log(`[TX-ANALYSIS] ⚠️ Transaction too small: $${usdAmount.toFixed(4)}, skipping`)
       return null
     }
 
-    console.log(
-      `[ANALYSIS] ${type.toUpperCase()}: Token Δ${netTokenChange.toFixed(4)}, SOL Δ${netSolChange.toFixed(4)}, $${usdAmount.toFixed(2)} (${tx.transaction.signatures[0].substring(0, 8)})`,
-    )
+    console.log(`[TX-ANALYSIS] 💰 Final: ${type.toUpperCase()} $${usdAmount.toFixed(2)} USD`)
 
     return {
       type,
-      solAmount: Math.abs(netSolChange),
-      tokenAmount: Math.abs(netTokenChange),
+      solAmount: Math.abs(netSolFlow),
+      tokenAmount: Math.abs(netTokenFlow),
       usdAmount,
       signature: tx.transaction.signatures[0],
       isJupiterTx: true,
     }
   } catch (error) {
-    console.error("[ANALYSIS] Transaction analysis error:", error)
+    console.error("[TX-ANALYSIS] Error analyzing transaction:", error)
     return null
   }
 }
@@ -505,7 +519,7 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
       await updateAllWalletBalances()
       const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
-      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens across wallets: ${totalTokens.toFixed(2)}`)
+      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
 
       console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
       await executeCoordinatedSell(sellAmountUsd)
