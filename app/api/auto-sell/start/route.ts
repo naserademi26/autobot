@@ -597,34 +597,39 @@ async function collectDexToolsData(): Promise<boolean> {
       if (usdAmount < 0.0001) continue // Lowered threshold to catch smaller transactions
 
       const apiType = String(tx.type || "").toLowerCase()
-      const actualType = apiType === "buy" ? "sell" : apiType === "sell" ? "buy" : apiType
 
       console.log(
-        `[DEXTOOLS] 🔍 Raw API type: "${tx.type}" -> Corrected type: "${actualType}" for $${usdAmount.toFixed(4)}`,
+        `[DEXTOOLS] 🔍 Raw transaction: Type="${tx.type}", USD=$${usdAmount.toFixed(4)}, Time=${new Date(txTime).toISOString()}`,
       )
 
-      if (actualType === "buy" || actualType === "purchase") {
+      // DIRECT MAPPING - NO SWAPPING OR REVERSALS
+      if (apiType === "buy" || apiType === "purchase") {
         totalBuyVolumeUsd += usdAmount
         buyCount++
-        console.log(`[DEXTOOLS] ✅ BUY: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "buy")`)
-      } else if (actualType === "sell" || actualType === "sale") {
+        console.log(`[DEXTOOLS] ✅ BUY DETECTED: $${usdAmount.toFixed(4)} -> ADDING TO BUY PRESSURE`)
+      } else if (apiType === "sell" || apiType === "sale") {
         totalSellVolumeUsd += usdAmount
         sellCount++
-        console.log(`[DEXTOOLS] ✅ SELL: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "sell")`)
+        console.log(`[DEXTOOLS] ✅ SELL DETECTED: $${usdAmount.toFixed(4)} -> ADDING TO SELL PRESSURE`)
       } else {
-        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" -> "${actualType}" for $${usdAmount.toFixed(4)}`)
+        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" for $${usdAmount.toFixed(4)} - SKIPPING`)
       }
     }
 
-    // DIRECT ASSIGNMENT - NO SWAPPING
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+    autoSellState.metrics.buyTransactionCount = buyCount
+    autoSellState.metrics.sellTransactionCount = sellCount
+    autoSellState.metrics.dataSourceConfidence = 95 // High confidence in DexTools Premium
 
-    console.log(`[DEXTOOLS] 🎯 FINAL RESULTS:`)
-    console.log(`[DEXTOOLS] 📈 BUY VOLUME: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} transactions)`)
-    console.log(`[DEXTOOLS] 📉 SELL VOLUME: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} transactions)`)
-    console.log(`[DEXTOOLS] 💰 NET FLOW: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`)
+    console.log(`[DEXTOOLS] 🎯 BULLETPROOF FINAL RESULTS:`)
+    console.log(`[DEXTOOLS] 📈 BUY PRESSURE: $${totalBuyVolumeUsd.toFixed(4)} (${buyCount} buy transactions)`)
+    console.log(`[DEXTOOLS] 📉 SELL PRESSURE: $${totalSellVolumeUsd.toFixed(4)} (${sellCount} sell transactions)`)
+    console.log(`[DEXTOOLS] 💰 NET FLOW: $${autoSellState.metrics.netUsdFlow.toFixed(4)}`)
+    console.log(
+      `[DEXTOOLS] 🔍 VERIFICATION: Buy=${totalBuyVolumeUsd > 0 ? "DETECTED" : "NONE"}, Sell=${totalSellVolumeUsd > 0 ? "DETECTED" : "NONE"}`,
+    )
 
     return totalBuyVolumeUsd > 0 || totalSellVolumeUsd > 0
   } catch (error) {
