@@ -594,21 +594,25 @@ async function collectDexToolsData(): Promise<boolean> {
       if (txTime < cutoffTime) continue
 
       const usdAmount = Number(tx.usdAmount || 0)
-      if (usdAmount < 0.001) continue // Skip very small transactions
+      if (usdAmount < 0.0001) continue // Lowered threshold to catch smaller transactions
 
-      // BULLETPROOF CLASSIFICATION: Use API type directly, NO REVERSALS
       const apiType = String(tx.type || "").toLowerCase()
+      const actualType = apiType === "buy" ? "sell" : apiType === "sell" ? "buy" : apiType
 
-      if (apiType === "buy" || apiType === "purchase") {
+      console.log(
+        `[DEXTOOLS] 🔍 Raw API type: "${tx.type}" -> Corrected type: "${actualType}" for $${usdAmount.toFixed(4)}`,
+      )
+
+      if (actualType === "buy" || actualType === "purchase") {
         totalBuyVolumeUsd += usdAmount
         buyCount++
-        console.log(`[DEXTOOLS] ✅ BUY: $${usdAmount.toFixed(4)} (API type: "${tx.type}")`)
-      } else if (apiType === "sell" || apiType === "sale") {
+        console.log(`[DEXTOOLS] ✅ BUY: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "buy")`)
+      } else if (actualType === "sell" || actualType === "sale") {
         totalSellVolumeUsd += usdAmount
         sellCount++
-        console.log(`[DEXTOOLS] ✅ SELL: $${usdAmount.toFixed(4)} (API type: "${tx.type}")`)
+        console.log(`[DEXTOOLS] ✅ SELL: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "sell")`)
       } else {
-        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" for $${usdAmount.toFixed(4)}`)
+        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" -> "${actualType}" for $${usdAmount.toFixed(4)}`)
       }
     }
 
