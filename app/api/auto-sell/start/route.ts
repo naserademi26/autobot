@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
     // Update global state
     autoSellState.config = {
       ...config,
-      timeWindowSeconds: config.timeWindowSeconds || 60, // 1-minute tracking
+      timeWindowSeconds: config.timeWindowSeconds || 30, // 30-second tracking window
       sellPercentageOfNetFlow: config.sellPercentageOfNetFlow || 25, // Default 25% of net flow
       minNetFlowUsd: config.minNetFlowUsd || 10, // Minimum $10 net flow to trigger
       cooldownSeconds: config.cooldownSeconds || 15, // Reduced from 30 to 15 seconds for faster execution
@@ -141,9 +141,11 @@ function startConfigurableAnalysisCycle() {
   updateSolPrice()
 
   const timeWindowSeconds = autoSellState.config.timeWindowSeconds
-  const timeWindowMs = timeWindowSeconds * 1000
+  const scanIntervalSeconds = 10 // Scan every 10 seconds for comprehensive coverage
 
-  console.log(`[AUTO-SELL] Starting immediate ${timeWindowSeconds}-second analysis cycles...`)
+  console.log(
+    `[AUTO-SELL] Starting ${timeWindowSeconds}-second analysis with ${scanIntervalSeconds}-second scanning...`,
+  )
 
   // Run first analysis immediately
   collectMarketDataForConfigurableWindow()
@@ -156,13 +158,15 @@ function startConfigurableAnalysisCycle() {
     }
 
     try {
-      console.log(`[AUTO-SELL] Running ${timeWindowSeconds}-second market analysis...`)
+      console.log(
+        `[AUTO-SELL] Running ${timeWindowSeconds}-second market analysis (scan every ${scanIntervalSeconds}s)...`,
+      )
       await collectMarketDataForConfigurableWindow()
       await analyzeAndExecuteAutoSell()
     } catch (error) {
       console.error(`[AUTO-SELL] ${timeWindowSeconds}-second analysis error:`, error)
     }
-  }, timeWindowMs)
+  }, scanIntervalSeconds * 1000) // Scan every 10 seconds instead of every time window
 
   autoSellState.intervals.push(analysisInterval)
 }
@@ -207,23 +211,32 @@ async function collectDirectSolanaTransactions() {
   const currentTime = Date.now()
   const windowStartTime = currentTime - timeWindowMs
 
-  console.log(
-    `[SOLANA-RPC] 🔍 DIRECTLY MONITORING token mint ${autoSellState.config.mint} for ALL activity in last ${autoSellState.config.timeWindowSeconds} seconds`,
-  )
-  console.log(`[SOLANA-RPC] 📊 Current token price: $${autoSellState.metrics.currentPriceUsd.toFixed(8)}`)
-  console.log(
-    `[SOLANA-RPC] 🕐 Time window: ${new Date(windowStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
-  )
+  console.log(`[SOLANA-RPC] 🔍 DEBUGGING TRANSACTION DETECTION`)
+  console.log(`[SOLANA-RPC] Token mint: ${autoSellState.config.mint}`)
+  console.log(`[SOLANA-RPC] Current time: ${new Date(currentTime).toISOString()}`)
+  console.log(`[SOLANA-RPC] Window start: ${new Date(windowStartTime).toISOString()}`)
+  console.log(`[SOLANA-RPC] Time window: ${autoSellState.config.timeWindowSeconds} seconds`)
+  console.log(`[SOLANA-RPC] Current token price: $${autoSellState.metrics.currentPriceUsd.toFixed(8)}`)
 
   try {
     const tokenMintPubkey = new PublicKey(autoSellState.config.mint)
 
     console.log(`[SOLANA-RPC] 📋 Getting signatures for token mint address...`)
     const signatures = await connection.getSignaturesForAddress(tokenMintPubkey, {
-      limit: 100, // Increased limit to catch more transactions
+      limit: 200,
     })
 
-    console.log(`[SOLANA-RPC] 📋 Found ${signatures.length} signatures for token mint`)
+    console.log(`[SOLANA-RPC] 📋 Found ${signatures.length} total signatures for token mint`)
+
+    // Log all signatures with their timestamps
+    signatures.forEach((sig, index) => {
+      const txTime = (sig.blockTime || 0) * 1000
+      const ageSeconds = Math.floor((currentTime - txTime) / 1000)
+      const withinWindow = txTime >= windowStartTime
+      console.log(
+        `[SOLANA-RPC] Signature ${index + 1}: ${sig.signature.substring(0, 8)}... | ${ageSeconds}s ago | ${withinWindow ? "✅ WITHIN WINDOW" : "❌ TOO OLD"}`,
+      )
+    })
 
     // Filter signatures by time window
     const recentSignatures = signatures.filter((sig) => {
@@ -231,7 +244,18 @@ async function collectDirectSolanaTransactions() {
       return txTime >= windowStartTime
     })
 
-    console.log(`[SOLANA-RPC] 📋 ${recentSignatures.length} signatures within time window`)
+    console.log(
+      `[SOLANA-RPC] 📋 ${recentSignatures.length} signatures within ${autoSellState.config.timeWindowSeconds}-second window`,
+    )
+
+    if (recentSignatures.length === 0) {
+      console.log(`[SOLANA-RPC] ⚠️ NO RECENT TRANSACTIONS FOUND!`)
+      console.log(`[SOLANA-RPC] This could mean:`)
+      console.log(`[SOLANA-RPC] 1. No trading activity in the last ${autoSellState.config.timeWindowSeconds} seconds`)
+      console.log(`[SOLANA-RPC] 2. RPC endpoint has delays`)
+      console.log(`[SOLANA-RPC] 3. Token mint address is incorrect`)
+      console.log(`[SOLANA-RPC] 4. Transactions are going through different programs`)
+    }
 
     let totalBuyVolumeUsd = 0
     let totalSellVolumeUsd = 0
@@ -245,9 +269,7 @@ async function collectDirectSolanaTransactions() {
       const txTime = (sigInfo.blockTime || 0) * 1000
 
       try {
-        console.log(
-          `[SOLANA-RPC] 🔍 Analyzing transaction ${sigInfo.signature.substring(0, 8)}... at ${new Date(txTime).toISOString()}`,
-        )
+        console.log(`[SOLANA-RPC] 🔍 Fetching transaction ${sigInfo.signature.substring(0, 8)}...`)
 
         const tx = await connection.getTransaction(sigInfo.signature, {
           commitment: "confirmed",
@@ -258,6 +280,12 @@ async function collectDirectSolanaTransactions() {
           console.log(`[SOLANA-RPC] ❌ No transaction data for ${sigInfo.signature.substring(0, 8)}`)
           continue
         }
+
+        console.log(`[SOLANA-RPC] ✅ Transaction data retrieved for ${sigInfo.signature.substring(0, 8)}`)
+        console.log(`[SOLANA-RPC] - Block time: ${new Date(txTime).toISOString()}`)
+        console.log(`[SOLANA-RPC] - Success: ${tx.meta.err === null}`)
+        console.log(`[SOLANA-RPC] - Pre token balances: ${tx.meta.preTokenBalances?.length || 0}`)
+        console.log(`[SOLANA-RPC] - Post token balances: ${tx.meta.postTokenBalances?.length || 0}`)
 
         analyzedCount++
 
@@ -275,20 +303,18 @@ async function collectDirectSolanaTransactions() {
             totalBuyVolumeUsd += tradeInfo.usdAmount
             buyCount++
             console.log(
-              `[SOLANA-RPC] ✅ BUY DETECTED: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] ✅ BUY DETECTED: $${tradeInfo.usdAmount.toFixed(4)} | ${tradeInfo.tokenAmount.toFixed(4)} tokens`,
             )
           } else if (tradeInfo.type === "sell") {
             totalSellVolumeUsd += tradeInfo.usdAmount
             sellCount++
             console.log(
-              `[SOLANA-RPC] ❌ SELL DETECTED: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+              `[SOLANA-RPC] ❌ SELL DETECTED: $${tradeInfo.usdAmount.toFixed(4)} | ${tradeInfo.tokenAmount.toFixed(4)} tokens`,
             )
           }
         } else {
           filteredCount++
-          console.log(
-            `[SOLANA-RPC] ⚪ Transaction ${sigInfo.signature.substring(0, 8)} filtered out (not a trade or too small)`,
-          )
+          console.log(`[SOLANA-RPC] ⚪ Transaction ${sigInfo.signature.substring(0, 8)} - NO TRADE DETECTED`)
         }
       } catch (txError) {
         console.log(
@@ -299,29 +325,25 @@ async function collectDirectSolanaTransactions() {
     }
 
     autoSellState.marketTrades = processedTransactions
-
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
-    console.log(`[SOLANA-RPC] 📊 ANALYSIS COMPLETE:`)
-    console.log(`[SOLANA-RPC] - Total signatures found: ${signatures.length}`)
-    console.log(`[SOLANA-RPC] - Within time window: ${recentSignatures.length}`)
-    console.log(`[SOLANA-RPC] - Transactions analyzed: ${analyzedCount}`)
-    console.log(`[SOLANA-RPC] - Transactions filtered out: ${filteredCount}`)
-    console.log(`[SOLANA-RPC] - Buy transactions: ${buyCount} ($${totalBuyVolumeUsd.toFixed(2)})`)
-    console.log(`[SOLANA-RPC] - Sell transactions: ${sellCount} ($${totalSellVolumeUsd.toFixed(2)})`)
-    console.log(`[SOLANA-RPC] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`)
+    console.log(`[SOLANA-RPC] 📊 FINAL RESULTS:`)
+    console.log(`[SOLANA-RPC] - Total signatures: ${signatures.length}`)
+    console.log(`[SOLANA-RPC] - Recent signatures: ${recentSignatures.length}`)
+    console.log(`[SOLANA-RPC] - Analyzed: ${analyzedCount}`)
+    console.log(`[SOLANA-RPC] - Filtered out: ${filteredCount}`)
+    console.log(`[SOLANA-RPC] - Buy transactions: ${buyCount} ($${totalBuyVolumeUsd.toFixed(4)})`)
+    console.log(`[SOLANA-RPC] - Sell transactions: ${sellCount} ($${totalSellVolumeUsd.toFixed(4)})`)
+    console.log(`[SOLANA-RPC] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(4)}`)
 
     if (buyCount === 0 && sellCount === 0) {
-      console.log(
-        `[SOLANA-RPC] ⚠️ NO TRADING ACTIVITY detected for token ${autoSellState.config.mint} in the last ${autoSellState.config.timeWindowSeconds} seconds`,
-      )
-      console.log(`[SOLANA-RPC] 💡 This could mean:`)
-      console.log(`[SOLANA-RPC] - No one is trading this token right now`)
-      console.log(`[SOLANA-RPC] - All transactions are too small (< $0.01)`)
-      console.log(`[SOLANA-RPC] - Token price is causing USD calculations to be filtered`)
-      console.log(`[SOLANA-RPC] - RPC is not returning recent transactions`)
+      console.log(`[SOLANA-RPC] ⚠️ NO TRADES DETECTED - DEBUGGING INFO:`)
+      console.log(`[SOLANA-RPC] - Token price: $${autoSellState.metrics.currentPriceUsd}`)
+      console.log(`[SOLANA-RPC] - Minimum USD threshold: $0.001`)
+      console.log(`[SOLANA-RPC] - RPC endpoint: ${connection.rpcEndpoint}`)
+      console.log(`[SOLANA-RPC] - Token mint: ${autoSellState.config.mint}`)
     }
   } catch (error) {
     console.error("[SOLANA-RPC] Error collecting transaction data:", error)
@@ -331,84 +353,129 @@ async function collectDirectSolanaTransactions() {
 
 function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
   try {
+    console.log(`[TX-ANALYSIS] 🔍 Analyzing transaction ${tx.transaction.signatures[0].substring(0, 8)}...`)
+
     if (!tx.meta || !tx.meta.preTokenBalances || !tx.meta.postTokenBalances) {
+      console.log(`[TX-ANALYSIS] ❌ Missing token balance data`)
       return null
     }
 
     const preTokenBalances = tx.meta.preTokenBalances || []
     const postTokenBalances = tx.meta.postTokenBalances || []
 
+    console.log(`[TX-ANALYSIS] - Pre token balances: ${preTokenBalances.length}`)
+    console.log(`[TX-ANALYSIS] - Post token balances: ${postTokenBalances.length}`)
+
+    // Find all token balance changes for our mint
     const tokenBalanceChanges = []
 
-    // Check existing accounts for balance changes
+    // Check existing accounts
     for (const preBalance of preTokenBalances) {
       if (preBalance.mint === tokenMint) {
         const postBalance = postTokenBalances.find(
           (post: any) => post.accountIndex === preBalance.accountIndex && post.mint === tokenMint,
         )
+
         if (postBalance) {
           const preAmount = Number(preBalance.uiTokenAmount?.uiAmount || 0)
           const postAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
           const change = postAmount - preAmount
 
-          if (Math.abs(change) > 0.001) {
+          if (Math.abs(change) > 0.000001) {
             tokenBalanceChanges.push({
-              account: preBalance.accountIndex,
-              change: change,
+              accountIndex: preBalance.accountIndex,
               preAmount,
               postAmount,
+              change,
             })
+            console.log(
+              `[TX-ANALYSIS] - Account ${preBalance.accountIndex}: ${preAmount.toFixed(6)} → ${postAmount.toFixed(6)} (${change > 0 ? "+" : ""}${change.toFixed(6)})`,
+            )
           }
         }
       }
     }
 
-    // Check for new token accounts (first-time buyers)
+    // Check for new token accounts
     for (const postBalance of postTokenBalances) {
       if (postBalance.mint === tokenMint) {
         const preBalance = preTokenBalances.find(
           (pre: any) => pre.accountIndex === postBalance.accountIndex && pre.mint === tokenMint,
         )
+
         if (!preBalance) {
           const newTokens = Number(postBalance.uiTokenAmount?.uiAmount || 0)
-          if (newTokens > 0.001) {
+          if (newTokens > 0.000001) {
             tokenBalanceChanges.push({
-              account: postBalance.accountIndex,
-              change: newTokens,
+              accountIndex: postBalance.accountIndex,
               preAmount: 0,
               postAmount: newTokens,
-              isNewAccount: true,
+              change: newTokens,
             })
+            console.log(
+              `[TX-ANALYSIS] - NEW Account ${postBalance.accountIndex}: 0 → ${newTokens.toFixed(6)} (+${newTokens.toFixed(6)})`,
+            )
           }
         }
       }
     }
 
     if (tokenBalanceChanges.length === 0) {
+      console.log(`[TX-ANALYSIS] ❌ No token balance changes found for mint ${tokenMint}`)
       return null
     }
 
-    // The account with the largest positive change is likely the buyer
-    // The account with the largest negative change is likely the seller
+    console.log(`[TX-ANALYSIS] - Total balance changes: ${tokenBalanceChanges.length}`)
+
+    // Calculate net token flow
+    let totalTokensIn = 0
+    let totalTokensOut = 0
     let largestChange = 0
-    let transactionType = ""
-    let tradeAmount = 0
+    let largestChangeType = ""
 
     for (const change of tokenBalanceChanges) {
+      if (change.change > 0) {
+        totalTokensIn += change.change
+      } else {
+        totalTokensOut += Math.abs(change.change)
+      }
+
       if (Math.abs(change.change) > Math.abs(largestChange)) {
         largestChange = change.change
-        tradeAmount = Math.abs(change.change)
-
-        if (change.change > 0) {
-          transactionType = "buy" // Someone received tokens
-        } else {
-          transactionType = "sell" // Someone sent tokens away
-        }
+        largestChangeType = change.change > 0 ? "positive" : "negative"
       }
     }
 
-    if (!transactionType || tradeAmount === 0) {
-      return null
+    console.log(`[TX-ANALYSIS] - Tokens in: ${totalTokensIn.toFixed(6)}`)
+    console.log(`[TX-ANALYSIS] - Tokens out: ${totalTokensOut.toFixed(6)}`)
+    console.log(`[TX-ANALYSIS] - Largest change: ${largestChange.toFixed(6)} (${largestChangeType})`)
+
+    // Determine transaction type
+    let transactionType = ""
+    let tradeAmount = 0
+
+    if (totalTokensIn > totalTokensOut) {
+      // Net positive = BUY
+      transactionType = "buy"
+      tradeAmount = totalTokensIn - totalTokensOut
+      console.log(`[TX-ANALYSIS] ✅ BUY: Net +${tradeAmount.toFixed(6)} tokens`)
+    } else if (totalTokensOut > totalTokensIn) {
+      // Net negative = SELL
+      transactionType = "sell"
+      tradeAmount = totalTokensOut - totalTokensIn
+      console.log(`[TX-ANALYSIS] ✅ SELL: Net -${tradeAmount.toFixed(6)} tokens`)
+    } else {
+      // Equal - use largest change
+      if (Math.abs(largestChange) > 0) {
+        transactionType = largestChange > 0 ? "buy" : "sell"
+        tradeAmount = Math.abs(largestChange)
+        console.log(
+          `[TX-ANALYSIS] ✅ ${transactionType.toUpperCase()} (by largest change): ${tradeAmount.toFixed(6)} tokens`,
+        )
+      } else {
+        console.log(`[TX-ANALYSIS] ❌ Cannot determine transaction type`)
+        return null
+      }
     }
 
     // Calculate USD value
@@ -421,13 +488,18 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
 
     const usdAmount = tradeAmount * tokenPriceUsd
 
-    if (usdAmount < 0.005) {
-      // $0.005 minimum
+    console.log(`[TX-ANALYSIS] - Token amount: ${tradeAmount.toFixed(6)}`)
+    console.log(`[TX-ANALYSIS] - Token price: $${tokenPriceUsd.toFixed(8)}`)
+    console.log(`[TX-ANALYSIS] - USD amount: $${usdAmount.toFixed(6)}`)
+
+    // Lower minimum threshold to catch more transactions
+    if (usdAmount < 0.0001) {
+      console.log(`[TX-ANALYSIS] ❌ USD amount too small: $${usdAmount.toFixed(6)} < $0.0001`)
       return null
     }
 
     console.log(
-      `[TX-ANALYSIS] ✅ ${transactionType.toUpperCase()}: ${tradeAmount.toFixed(4)} tokens = $${usdAmount.toFixed(4)} | Largest change: ${largestChange.toFixed(4)}`,
+      `[TX-ANALYSIS] ✅ VALID ${transactionType.toUpperCase()}: ${tradeAmount.toFixed(6)} tokens = $${usdAmount.toFixed(6)}`,
     )
 
     return {
@@ -435,8 +507,9 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
       tokenAmount: tradeAmount,
       usdAmount,
       signature: tx.transaction.signatures[0],
-      largestChange,
-      balanceChanges: tokenBalanceChanges,
+      tokensIn: totalTokensIn,
+      tokensOut: totalTokensOut,
+      balanceChanges: tokenBalanceChanges.length,
     }
   } catch (error) {
     console.error(`[TX-ANALYSIS] ❌ Error analyzing transaction:`, error)
