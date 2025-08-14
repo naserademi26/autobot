@@ -1,5 +1,7 @@
 "use client"
 
+import type React from "react"
+
 import { useEffect, useMemo, useRef, useState } from "react"
 import bs58 from "bs58"
 import { Connection, PublicKey } from "@solana/web3.js"
@@ -22,7 +24,94 @@ import {
   Target,
   TrendingUp,
   BarChart3,
+  Lock,
+  User,
 } from "lucide-react"
+
+function LoginForm({ onLogin }: { onLogin: () => void }) {
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
+  const [error, setError] = useState("")
+  const [loading, setLoading] = useState(false)
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setError("")
+
+    // Simple authentication check
+    if (username === "offlinerich" && password === "1244") {
+      localStorage.setItem("authenticated", "true")
+      onLogin()
+    } else {
+      setError("Invalid username or password")
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-4">
+      <Card className="w-full max-w-md bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
+        <CardHeader className="text-center pb-4">
+          <div className="mx-auto mb-4 p-3 rounded-full bg-blue-500/30 w-fit shadow-lg">
+            <Lock className="w-8 h-8 text-blue-400" />
+          </div>
+          <CardTitle className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+            🤖 Auto-Sell Bot Login
+          </CardTitle>
+          <p className="text-slate-400 text-sm mt-2">Enter your credentials to access the trading dashboard</p>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <Label htmlFor="username" className="text-slate-300 font-medium flex items-center gap-2">
+                <User className="w-4 h-4" />
+                Username
+              </Label>
+              <Input
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Enter username"
+                className="mt-2 bg-slate-800/70 border-slate-700/60 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/60 shadow-inner"
+                required
+              />
+            </div>
+            <div>
+              <Label htmlFor="password" className="text-slate-300 font-medium flex items-center gap-2">
+                <Lock className="w-4 h-4" />
+                Password
+              </Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+                className="mt-2 bg-slate-800/70 border-slate-700/60 text-slate-200 placeholder-slate-500 focus:ring-2 focus:ring-blue-500/60 focus:border-blue-500/60 shadow-inner"
+                required
+              />
+            </div>
+            {error && (
+              <div className="p-3 bg-rose-500/20 border border-rose-500/40 rounded-lg text-rose-400 text-sm font-medium">
+                {error}
+              </div>
+            )}
+            <Button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 shadow-xl hover:shadow-blue-500/30 transition-all"
+            >
+              {loading ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <Lock className="w-4 h-4 mr-2" />}
+              {loading ? "Authenticating..." : "Login"}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
 
 function safeWindowAccess<T>(callback: () => T, fallback: T): T {
   try {
@@ -108,7 +197,7 @@ function sanitizeMintInput(input: string): string {
   return s.replace(/[^1-9A-HJ-NP-Za-km-z]/g, "")
 }
 
-export default function AutoSellDashboard() {
+function MarketMomentumDashboard() {
   const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
 
@@ -147,6 +236,7 @@ export default function AutoSellDashboard() {
       buyVolumeUsd: 0,
       sellVolumeUsd: 0,
       lastSellTrigger: 0,
+      sellVolumeUsd: 0,
     },
     walletStatus: [],
   })
@@ -154,6 +244,11 @@ export default function AutoSellDashboard() {
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string>("")
   const refreshId = useRef(0)
+
+  const handleLogout = () => {
+    localStorage.removeItem("authenticated")
+    window.location.reload()
+  }
 
   useEffect(() => {
     let mounted = true
@@ -392,6 +487,15 @@ export default function AutoSellDashboard() {
           >
             {status.isRunning ? "🟢 MONITORING" : "🔴 STOPPED"}
           </Badge>
+          <Button
+            onClick={handleLogout}
+            variant="outline"
+            size="sm"
+            className="border-slate-600 text-slate-300 hover:bg-slate-800 shadow-lg bg-transparent"
+          >
+            <Lock className="w-4 h-4 mr-2" />
+            Logout
+          </Button>
         </div>
       </header>
 
@@ -906,4 +1010,23 @@ export default function AutoSellDashboard() {
       </div>
     </div>
   )
+}
+
+export default function Page() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+
+  useEffect(() => {
+    const authenticated = localStorage.getItem("authenticated") === "true"
+    setIsAuthenticated(authenticated)
+  }, [])
+
+  const handleLogin = () => {
+    setIsAuthenticated(true)
+  }
+
+  if (!isAuthenticated) {
+    return <LoginForm onLogin={handleLogin} />
+  }
+
+  return <MarketMomentumDashboard />
 }
