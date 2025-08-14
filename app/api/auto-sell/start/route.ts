@@ -115,14 +115,10 @@ async function startAutoSellEngine() {
   autoSellState.intervals = []
 
   autoSellState.botStartTime = Date.now()
-  const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
-  autoSellState.firstAnalysisTime = autoSellState.botStartTime + timeWindowMs
+  autoSellState.firstAnalysisTime = autoSellState.botStartTime
 
   console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
-  console.log(`[AUTO-SELL] First analysis will begin at ${new Date(autoSellState.firstAnalysisTime).toISOString()}`)
-  console.log(
-    `[AUTO-SELL] Waiting ${autoSellState.config.timeWindowSeconds} seconds before starting market analysis...`,
-  )
+  console.log(`[AUTO-SELL] Starting immediate market analysis...`)
 
   await startConfigurableAnalysisCycle()
 
@@ -145,39 +141,28 @@ function startConfigurableAnalysisCycle() {
   const timeWindowSeconds = autoSellState.config.timeWindowSeconds
   const timeWindowMs = timeWindowSeconds * 1000
 
-  console.log(`[AUTO-SELL] Setting up ${timeWindowSeconds}-second analysis cycles...`)
+  console.log(`[AUTO-SELL] Starting immediate ${timeWindowSeconds}-second analysis cycles...`)
 
-  const timeUntilFirstAnalysis = autoSellState.firstAnalysisTime - Date.now()
+  // Run first analysis immediately
+  collectMarketDataForConfigurableWindow()
+  analyzeAndExecuteAutoSell()
 
-  setTimeout(
-    () => {
-      if (!autoSellState.isRunning) return
+  const analysisInterval = setInterval(async () => {
+    if (!autoSellState.isRunning) {
+      clearInterval(analysisInterval)
+      return
+    }
 
-      console.log(`[AUTO-SELL] ${timeWindowSeconds}-second wait complete. Starting market analysis...`)
+    try {
+      console.log(`[AUTO-SELL] Running ${timeWindowSeconds}-second market analysis...`)
+      await collectMarketDataForConfigurableWindow()
+      await analyzeAndExecuteAutoSell()
+    } catch (error) {
+      console.error(`[AUTO-SELL] ${timeWindowSeconds}-second analysis error:`, error)
+    }
+  }, timeWindowMs)
 
-      // Run first analysis
-      collectMarketDataForConfigurableWindow()
-      analyzeAndExecuteAutoSell()
-
-      const analysisInterval = setInterval(async () => {
-        if (!autoSellState.isRunning) {
-          clearInterval(analysisInterval)
-          return
-        }
-
-        try {
-          console.log(`[AUTO-SELL] Starting ${timeWindowSeconds}-second market analysis...`)
-          await collectMarketDataForConfigurableWindow()
-          await analyzeAndExecuteAutoSell()
-        } catch (error) {
-          console.error(`[AUTO-SELL] ${timeWindowSeconds}-second analysis error:`, error)
-        }
-      }, timeWindowMs)
-
-      autoSellState.intervals.push(analysisInterval)
-    },
-    Math.max(0, timeUntilFirstAnalysis),
-  )
+  autoSellState.intervals.push(analysisInterval)
 }
 
 async function collectMarketDataForConfigurableWindow() {
@@ -214,18 +199,19 @@ async function collectDirectSolanaTransactions() {
     { commitment: "confirmed" },
   )
 
-  const monitoringStartTime = autoSellState.firstAnalysisTime
+  const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
   const currentTime = Date.now()
+  const windowStartTime = currentTime - timeWindowMs
 
   console.log(
-    `[SOLANA-RPC] Monitoring NEW transactions for token ${autoSellState.config.mint} from ${new Date(monitoringStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
+    `[SOLANA-RPC] Monitoring RECENT transactions for token ${autoSellState.config.mint} in last ${autoSellState.config.timeWindowSeconds} seconds`,
   )
 
   try {
     // Get recent signatures for the token mint
     const mintPubkey = new PublicKey(autoSellState.config.mint)
     const signatures = await connection.getSignaturesForAddress(mintPubkey, {
-      limit: 100, // Increased limit to catch more transactions
+      limit: 200, // Increased limit for better coverage
     })
 
     console.log(`[SOLANA-RPC] Found ${signatures.length} recent signatures`)
@@ -236,11 +222,11 @@ async function collectDirectSolanaTransactions() {
     let sellCount = 0
     const processedTransactions = []
 
-    // Process each transaction
+    // Process each transaction within the time window
     for (const sigInfo of signatures) {
       const txTime = (sigInfo.blockTime || 0) * 1000
 
-      if (txTime < monitoringStartTime) {
+      if (txTime < windowStartTime) {
         continue
       }
 
@@ -253,7 +239,7 @@ async function collectDirectSolanaTransactions() {
         if (!tx || !tx.meta) continue
 
         // Analyze transaction for buy/sell activity
-        const tradeInfo = analyzeTransaction(tx, autoSellState.config.mint)
+        const tradeInfo = analyzeTokenSwapTransaction(tx, autoSellState.config.mint)
 
         if (tradeInfo) {
           processedTransactions.push({
@@ -290,11 +276,11 @@ async function collectDirectSolanaTransactions() {
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
     console.log(
-      `[SOLANA-RPC] 📊 REAL DATA SINCE MONITORING STARTED - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
+      `[SOLANA-RPC] 📊 REAL-TIME DATA (${autoSellState.config.timeWindowSeconds}s window) - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
     )
 
     if (buyCount === 0 && sellCount === 0) {
-      console.log("[SOLANA-RPC] No new trading activity since monitoring started")
+      console.log(`[SOLANA-RPC] No trading activity in the last ${autoSellState.config.timeWindowSeconds} seconds`)
     }
   } catch (error) {
     console.error("[SOLANA-RPC] Error collecting transaction data:", error)
@@ -302,24 +288,33 @@ async function collectDirectSolanaTransactions() {
   }
 }
 
-function analyzeTransaction(tx: any, tokenMint: string) {
+function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
   try {
     if (!tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) {
       return null
     }
+
+    // Check if this transaction involves Jupiter or other DEX programs
+    const programIds = tx.transaction.message.staticAccountKeys || []
+    const jupiterPrograms = [
+      "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter V6
+      "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", // Jupiter V4
+    ]
+
+    const isJupiterTx = programIds.some((id: string) => jupiterPrograms.includes(id))
 
     // Look for SOL balance changes to determine buy/sell
     const solBalanceChanges = tx.meta.postBalances.map(
       (post: number, index: number) => post - tx.meta.preBalances[index],
     )
 
-    // Find the largest SOL balance change (excluding fees)
+    // Find significant SOL balance changes (excluding small fee changes)
     let maxSolChange = 0
     let maxSolChangeIndex = -1
 
     solBalanceChanges.forEach((change: number, index: number) => {
-      if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 5000) {
-        // Ignore small fee changes
+      if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 10000) {
+        // Ignore changes smaller than 0.00001 SOL
         maxSolChange = change
         maxSolChangeIndex = index
       }
@@ -333,14 +328,22 @@ function analyzeTransaction(tx: any, tokenMint: string) {
     const solPriceUsd = autoSellState.metrics.solPriceUsd || 100
     const usdAmount = Math.abs(solChange) * solPriceUsd
 
+    // Only process transactions with meaningful USD value
+    if (usdAmount < 0.1) {
+      return null
+    }
+
     // Determine if it's a buy or sell based on SOL flow
-    const type = solChange < 0 ? "buy" : "sell" // Negative SOL change = buying tokens with SOL
+    // Negative SOL change = buying tokens with SOL (spending SOL)
+    // Positive SOL change = selling tokens for SOL (receiving SOL)
+    const type = solChange < 0 ? "buy" : "sell"
 
     return {
       type,
       solAmount: Math.abs(solChange),
       usdAmount,
       signature: tx.transaction.signatures[0],
+      isJupiterTx,
     }
   } catch (error) {
     return null
