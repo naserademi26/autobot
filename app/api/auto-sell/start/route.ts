@@ -526,17 +526,23 @@ function analyzeTokenMintTransaction(transaction: any, tokenMint: string) {
       return null
     }
 
-    // Calculate USD amount
-    const currentPrice = autoSellState.metrics.currentPriceUsd || 0
+    // Calculate USD amount with better price handling
+    let currentPrice = autoSellState.metrics.currentPriceUsd || 0
+
+    if (currentPrice === 0) {
+      currentPrice = 0.00001 // Use a minimal price to avoid filtering out transactions
+      console.log(`[TX-ANALYSIS] ⚠️ Using fallback price: $${currentPrice}`)
+    }
+
     const usdAmount = tradeAmount * currentPrice
 
-    if (usdAmount < 0.001) {
-      console.log(`[TX-ANALYSIS] ❌ USD amount too small: $${usdAmount.toFixed(6)}`)
+    if (usdAmount < 0.0001) {
+      console.log(`[TX-ANALYSIS] ❌ USD amount too small: $${usdAmount.toFixed(8)}`)
       return null
     }
 
     console.log(
-      `[TX-ANALYSIS] 🎯 FINAL CLASSIFICATION: ${transactionType.toUpperCase()} - $${usdAmount.toFixed(4)} (${tradeAmount.toFixed(6)} tokens at $${currentPrice.toFixed(8)})`,
+      `[TX-ANALYSIS] 🎯 FINAL CLASSIFICATION: ${transactionType.toUpperCase()} - $${usdAmount.toFixed(6)} (${tradeAmount.toFixed(6)} tokens at $${currentPrice.toFixed(8)})`,
     )
 
     return {
@@ -801,12 +807,18 @@ async function analyzeAndExecuteAutoSell() {
     const currentTime = Date.now()
 
     console.log(
-      `[AUTO-SELL] 📊 ANALYSIS - Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net Flow: $${netUsdFlow.toFixed(2)}`,
+      `[AUTO-SELL] 📊 ANALYSIS - Buy: $${buyVolumeUsd.toFixed(4)} | Sell: $${sellVolumeUsd.toFixed(4)} | Net Flow: $${netUsdFlow.toFixed(4)}`,
+    )
+    console.log(
+      `[AUTO-SELL] 📊 TRANSACTION COUNTS - Buys: ${autoSellState.metrics.buyTransactionCount} | Sells: ${autoSellState.metrics.sellTransactionCount}`,
     )
 
-    if (netUsdFlow > 0 && buyVolumeUsd > 0) {
+    const minNetFlow = 0.01 // Minimum $0.01 net flow to trigger
+    const sellTriggerActive = netUsdFlow > minNetFlow && buyVolumeUsd > sellVolumeUsd && buyVolumeUsd > 0.01
+
+    if (sellTriggerActive) {
       console.log(
-        `[AUTO-SELL] ✅ SELL CRITERIA MET! Net flow $${netUsdFlow.toFixed(2)} > $0 with buy volume $${buyVolumeUsd.toFixed(2)}`,
+        `[AUTO-SELL] ✅ SELL CRITERIA MET! Net flow $${netUsdFlow.toFixed(4)} > $${minNetFlow} with buy volume $${buyVolumeUsd.toFixed(4)} > sell volume $${sellVolumeUsd.toFixed(4)}`,
       )
 
       if (currentTime - autoSellState.metrics.lastSellTrigger < cooldownMs) {
@@ -818,7 +830,7 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] 🚀 EXECUTING IMMEDIATE SELL! Positive net flow detected.`)
 
       const sellAmountUsd = netUsdFlow * 0.25
-      console.log(`[AUTO-SELL] 💰 Sell Amount: 25% of $${netUsdFlow.toFixed(2)} = $${sellAmountUsd.toFixed(2)}`)
+      console.log(`[AUTO-SELL] 💰 Sell Amount: 25% of $${netUsdFlow.toFixed(4)} = $${sellAmountUsd.toFixed(4)}`)
 
       console.log(`[AUTO-SELL] Step 1: Updating token price...`)
       await updateTokenPrice()
@@ -832,10 +844,24 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
       await executeCoordinatedSell(netUsdFlow)
       console.log(`[AUTO-SELL] Step 3 Complete: Sell execution finished`)
+
+      console.log(`[AUTO-SELL] 🔄 RESETTING METRICS after successful sell`)
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
+      autoSellState.metrics.buyTransactionCount = 0
+      autoSellState.metrics.sellTransactionCount = 0
+      autoSellState.metrics.lastSellTrigger = currentTime
     } else {
       console.log(
-        `[AUTO-SELL] ❌ No positive net flow detected (Net: $${netUsdFlow.toFixed(2)}, Buy: $${buyVolumeUsd.toFixed(2)}), no sell triggered`,
+        `[AUTO-SELL] ❌ Sell criteria NOT met - Net: $${netUsdFlow.toFixed(4)}, Buy: $${buyVolumeUsd.toFixed(4)}, Sell: $${sellVolumeUsd.toFixed(4)}`,
       )
+
+      if (sellVolumeUsd > buyVolumeUsd && sellVolumeUsd > 0.01) {
+        console.log(
+          `[AUTO-SELL] 📉 SELL PRESSURE DETECTED: Sells ($${sellVolumeUsd.toFixed(4)}) > Buys ($${buyVolumeUsd.toFixed(4)}) - No sell triggered`,
+        )
+      }
     }
   } catch (error) {
     console.error("[AUTO-SELL] ❌ CRITICAL ERROR in analysis and execution:", error)
