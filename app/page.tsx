@@ -24,6 +24,24 @@ import {
   BarChart3,
 } from "lucide-react"
 
+function safeWindowAccess<T>(callback: () => T, fallback: T): T {
+  try {
+    if (typeof window === "undefined") return fallback
+    return callback()
+  } catch (error) {
+    console.warn("Cross-origin window access blocked:", error)
+    return fallback
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("unhandledrejection", (event) => {
+    console.warn("Unhandled promise rejection:", event.reason)
+    // Prevent the error from crashing the app
+    event.preventDefault()
+  })
+}
+
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
 
 interface TokenInfo {
@@ -211,15 +229,25 @@ export default function AutoSellDashboard() {
     try {
       setToken({})
       if (!mintAddr) return
-      const j = await fetch("https://token.jup.ag/all").then((r) => r.json())
-      const found = (j as any[]).find((t: any) => t.address === mintAddr)
-      if (found) return setToken({ name: found.name, symbol: found.symbol, source: "jup" })
 
-      const p = await fetch(`https://frontend-api.pump.fun/coins/${mintAddr}`).then((r) => (r.ok ? r.json() : null))
-      if (p && p.symbol) return setToken({ name: p.name, symbol: p.symbol, source: "pump" })
+      try {
+        const j = await fetch("https://token.jup.ag/all").then((r) => r.json())
+        const found = (j as any[]).find((t: any) => t.address === mintAddr)
+        if (found) return setToken({ name: found.name, symbol: found.symbol, source: "jup" })
+      } catch (error) {
+        console.warn("Jupiter token fetch failed:", error)
+      }
+
+      try {
+        const p = await fetch(`https://frontend-api.pump.fun/coins/${mintAddr}`).then((r) => (r.ok ? r.json() : null))
+        if (p && p.symbol) return setToken({ name: p.name, symbol: p.symbol, source: "pump" })
+      } catch (error) {
+        console.warn("Pump.fun token fetch failed:", error)
+      }
 
       setToken({ name: undefined, symbol: undefined, source: "unknown" })
-    } catch {
+    } catch (error) {
+      console.warn("Token metadata resolution failed:", error)
       setToken({ source: "unknown" })
     }
   }
@@ -253,6 +281,8 @@ export default function AutoSellDashboard() {
         if (cur !== refreshId.current) return
       }
       if (cur === refreshId.current) setBalances(next)
+    } catch (error) {
+      console.error("Balance refresh failed:", error)
     } finally {
       if (cur === refreshId.current) setBalancesLoading(false)
     }
@@ -291,6 +321,7 @@ export default function AutoSellDashboard() {
         setLog(`✅ Market momentum auto-sell engine started successfully!`)
       }
     } catch (e: any) {
+      console.error("Auto-sell start failed:", e)
       setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
       setLoading(false)
@@ -313,6 +344,7 @@ export default function AutoSellDashboard() {
         setLog(`✅ Auto-sell engine stopped successfully!`)
       }
     } catch (e: any) {
+      console.error("Auto-sell stop failed:", e)
       setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
       setLoading(false)

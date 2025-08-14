@@ -1144,42 +1144,79 @@ async function collectDexScreenerData() {
   }
 
   try {
-    console.log("[DEXSCREENER] Using DexScreener with conservative estimation")
+    console.log("[DEXSCREENER] Fetching real transaction data from DexScreener")
 
-    const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
-    const data = await response.json()
+    // Get token info and current price
+    const tokenResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
+    const tokenData = await tokenResponse.json()
 
-    if (data.pairs && data.pairs.length > 0) {
-      const pair = data.pairs[0]
+    if (tokenData.pairs && tokenData.pairs.length > 0) {
+      const pair = tokenData.pairs[0]
       const priceUsd = Number(pair.priceUsd || 0)
-      const volume24h = Number(pair.volume?.h24 || 0)
-      const priceChange5m = Number(pair.priceChange?.m5 || 0)
 
+      // Update current price
       autoSellState.metrics.currentPriceUsd = priceUsd
       autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
 
-      const timeWindowMinutes = autoSellState.config.timeWindowSeconds / 60
-      const estimatedVolume = (volume24h / (24 * 60)) * timeWindowMinutes // Volume for time window
+      console.log(`[DEXSCREENER] Current price: $${priceUsd.toFixed(8)}`)
 
-      if (priceChange5m > 0.5) {
-        // Positive price movement suggests buying pressure
-        autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.6
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.4
-      } else if (priceChange5m < -0.5) {
-        // Negative price movement suggests selling pressure
-        autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.4
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.6
-      } else {
-        // Neutral movement
-        autoSellState.metrics.buyVolumeUsd = estimatedVolume * 0.5
-        autoSellState.metrics.sellVolumeUsd = estimatedVolume * 0.5
+      // Try to get recent transactions from DexScreener's transaction endpoint
+      try {
+        const txResponse = await fetch(
+          `https://api.dexscreener.com/latest/dex/pairs/${pair.chainId}/${pair.pairAddress}/transactions`,
+        )
+        const txData = await txResponse.json()
+
+        if (txData.transactions && txData.transactions.length > 0) {
+          const currentTime = Date.now()
+          const windowStartTime = currentTime - autoSellState.config.timeWindowSeconds * 1000
+
+          let totalBuyVolumeUsd = 0
+          let totalSellVolumeUsd = 0
+          let buyCount = 0
+          let sellCount = 0
+
+          for (const tx of txData.transactions) {
+            const txTime = new Date(tx.timestamp).getTime()
+
+            // Only include transactions within our time window
+            if (txTime >= windowStartTime) {
+              const usdAmount = Number(tx.amountUSD || 0)
+
+              if (usdAmount > 0.001) {
+                // Minimum $0.001 threshold
+                if (tx.type === "buy") {
+                  totalBuyVolumeUsd += usdAmount
+                  buyCount++
+                  console.log(`[DEXSCREENER] ✅ BUY: $${usdAmount.toFixed(4)} at ${new Date(txTime).toISOString()}`)
+                } else if (tx.type === "sell") {
+                  totalSellVolumeUsd += usdAmount
+                  sellCount++
+                  console.log(`[DEXSCREENER] ❌ SELL: $${usdAmount.toFixed(4)} at ${new Date(txTime).toISOString()}`)
+                }
+              }
+            }
+          }
+
+          autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
+          autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
+          autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+
+          console.log(
+            `[DEXSCREENER] 📊 REAL DATA: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+          )
+
+          return // Successfully got real transaction data
+        }
+      } catch (txError) {
+        console.log(`[DEXSCREENER] Transaction endpoint failed: ${txError.message}`)
       }
 
-      autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
-
-      console.log(
-        `[DEXSCREENER] Price: $${priceUsd.toFixed(8)} | 5m Change: ${priceChange5m.toFixed(2)}% | Est Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Est Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-      )
+      // If we can't get real transactions, don't create artificial data
+      console.log("[DEXSCREENER] ⚠️ No real transaction data available - setting volumes to zero")
+      autoSellState.metrics.buyVolumeUsd = 0
+      autoSellState.metrics.sellVolumeUsd = 0
+      autoSellState.metrics.netUsdFlow = 0
     } else {
       console.log("[DEXSCREENER] No trading pairs found")
       autoSellState.metrics.buyVolumeUsd = 0
@@ -1196,150 +1233,53 @@ async function collectDexScreenerData() {
 
 async function collectBitqueryEAPData() {
   if (!autoSellState.config) {
-    console.error("[BITQUERY-EAP] ❌ CRITICAL: autoSellState.config is null")
-    return { buyVolumeUsd: 0, sellVolumeUsd: 0, netUsdFlow: 0 }
+    console.error("[BITQUERY-EAP] Error: autoSellState.config is null")
+    return
   }
 
   try {
-    const timeWindowSeconds = autoSellState.config.timeWindowSeconds || 30
+    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
     const mint = autoSellState.config.mint
 
-    if (!mint || mint.length < 32) {
-      console.error(`[BITQUERY-EAP] ❌ INVALID MINT ADDRESS: "${mint}"`)
-      throw new Error("Invalid mint address")
-    }
+    console.log(`[BITQUERY-EAP] 🔍 Fetching real-time DEX data for ${mint}`)
+    console.log(`[BITQUERY-EAP] Time window: ${timeWindowSeconds} seconds`)
 
-    const currentTime = Date.now()
-    const windowStartTime = currentTime - timeWindowSeconds * 1000
-    autoSellState.monitoringStartTime = windowStartTime
-    autoSellState.monitoringEndTime = currentTime
-    autoSellState.lastDataUpdateTime = currentTime
-
-    console.log(`[BITQUERY-EAP] 🔍 DETAILED REQUEST INFO:`)
-    console.log(`[BITQUERY-EAP] - Token mint: ${mint}`)
-    console.log(`[BITQUERY-EAP] - Time window: ${timeWindowSeconds} seconds`)
-    console.log(`[BITQUERY-EAP] - Window start: ${new Date(windowStartTime).toISOString()}`)
-    console.log(`[BITQUERY-EAP] - Window end: ${new Date(currentTime).toISOString()}`)
-    console.log(`[BITQUERY-EAP] - API endpoint: /api/eap?mints=${mint}&seconds=${timeWindowSeconds}`)
-
-    // Call our EAP API endpoint with retry logic
-    let response
-    let retryCount = 0
-    const maxRetries = 3
-
-    while (retryCount < maxRetries) {
-      try {
-        console.log(`[BITQUERY-EAP] 📡 API CALL ATTEMPT ${retryCount + 1}/${maxRetries}...`)
-
-        response = await fetch(`/api/eap?mints=${mint}&seconds=${timeWindowSeconds}`, {
-          method: "GET",
-          headers: {
-            "Content-Type": "application/json",
-          },
-        })
-
-        console.log(`[BITQUERY-EAP] 📡 Response status: ${response.status} ${response.statusText}`)
-
-        if (response.ok) {
-          console.log(`[BITQUERY-EAP] ✅ API call successful on attempt ${retryCount + 1}`)
-          break
-        }
-
-        const errorText = await response.text()
-        console.log(`[BITQUERY-EAP] ❌ API error response: ${errorText}`)
-
-        retryCount++
-        if (retryCount < maxRetries) {
-          console.log(`[BITQUERY-EAP] 🔄 Retry ${retryCount}/${maxRetries} after ${response.status} error`)
-          await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
-        }
-      } catch (error) {
-        console.log(`[BITQUERY-EAP] ❌ Network error on attempt ${retryCount + 1}: ${error.message}`)
-        retryCount++
-        if (retryCount >= maxRetries) throw error
-        console.log(`[BITQUERY-EAP] 🔄 Retry ${retryCount}/${maxRetries} after network error`)
-        await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
-      }
-    }
+    const response = await fetch(`/api/eap?mints=${encodeURIComponent(mint)}&seconds=${timeWindowSeconds}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    })
 
     if (!response.ok) {
-      throw new Error(`Bitquery EAP API error: ${response.status} ${response.statusText}`)
+      throw new Error(`EAP API error: ${response.status} ${response.statusText}`)
     }
 
     const data = await response.json()
-    console.log(`[BITQUERY-EAP] 📋 RAW API RESPONSE:`, JSON.stringify(data, null, 2))
+    console.log(`[BITQUERY-EAP] Raw response:`, JSON.stringify(data, null, 2))
 
-    if (data.ok) {
-      const buyVolumeUsd = Number(data.buyers_usd || 0) // Correct: buyers_usd for buy volume
-      const sellVolumeUsd = Number(data.sellers_usd || 0) // Correct: sellers_usd for sell volume
-      const netUsdFlow = buyVolumeUsd - sellVolumeUsd
-      const tradesCount = Number(data.trades_count || 0)
+    if (data && typeof data === "object") {
+      const buyVolumeUsd = Number(data.buyers_usd || 0)
+      const sellVolumeUsd = Number(data.sellers_usd || 0)
+      const buyCount = Number(data.buyers_count || 0)
+      const sellCount = Number(data.sellers_count || 0)
 
-      console.log(`[BITQUERY-EAP] 🔍 DATA VALIDATION:`)
-      console.log(`[BITQUERY-EAP] - Raw buyers_usd: "${data.buyers_usd}" → ${buyVolumeUsd}`)
-      console.log(`[BITQUERY-EAP] - Raw sellers_usd: "${data.sellers_usd}" → ${sellVolumeUsd}`)
-      console.log(`[BITQUERY-EAP] - Raw trades_count: "${data.trades_count}" → ${tradesCount}`)
-      console.log(`[BITQUERY-EAP] - Calculated net flow: ${netUsdFlow}`)
+      console.log(`[BITQUERY-EAP] 📊 PARSED DATA:`)
+      console.log(`[BITQUERY-EAP] - Buy Volume: $${buyVolumeUsd.toFixed(4)} (${buyCount} transactions)`)
+      console.log(`[BITQUERY-EAP] - Sell Volume: $${sellVolumeUsd.toFixed(4)} (${sellCount} transactions)`)
+      console.log(`[BITQUERY-EAP] - Net Flow: $${(buyVolumeUsd - sellVolumeUsd).toFixed(4)}`)
 
       autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
       autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
-      autoSellState.metrics.netUsdFlow = netUsdFlow
+      autoSellState.metrics.netUsdFlow = buyVolumeUsd - sellVolumeUsd
 
-      console.log(`[BITQUERY-EAP] ✅ FINAL PROCESSED DATA:`)
-      console.log(`[BITQUERY-EAP] - Buy Volume: $${buyVolumeUsd.toFixed(2)} USD`)
-      console.log(`[BITQUERY-EAP] - Sell Volume: $${sellVolumeUsd.toFixed(2)} USD`)
-      console.log(`[BITQUERY-EAP] - Net Flow: $${netUsdFlow.toFixed(2)} USD`)
-      console.log(`[BITQUERY-EAP] - Total Trades: ${tradesCount}`)
-
-      if (tradesCount > 0) {
-        console.log(`[BITQUERY-EAP] 🎉 SUCCESS: Found ${tradesCount} transactions in ${timeWindowSeconds}s window`)
-        console.log(`[BITQUERY-EAP] 📊 BREAKDOWN:`)
-        console.log(`  - Buy Transactions: $${buyVolumeUsd.toFixed(2)} USD`)
-        console.log(`  - Sell Transactions: $${sellVolumeUsd.toFixed(2)} USD`)
-        console.log(
-          `  - Net Flow: $${netUsdFlow.toFixed(2)} USD (${netUsdFlow > 0 ? "POSITIVE - More Buying" : netUsdFlow < 0 ? "NEGATIVE - More Selling" : "NEUTRAL"})`,
-        )
-      } else {
-        console.log(`[BITQUERY-EAP] ⚠️ NO TRANSACTIONS: No trades found in ${timeWindowSeconds}s window`)
-        console.log(`[BITQUERY-EAP] This could mean:`)
-        console.log(`[BITQUERY-EAP] 1. No trading activity in the specified time window`)
-        console.log(`[BITQUERY-EAP] 2. Token mint address is incorrect`)
-        console.log(`[BITQUERY-EAP] 3. Bitquery API is not capturing this token's trades`)
-        console.log(`[BITQUERY-EAP] 4. Time window is too short for current market activity`)
-      }
-
-      // Store trade data for display
-      autoSellState.marketTrades = [
-        {
-          source: "bitquery-eap",
-          buyVolumeUsd,
-          sellVolumeUsd,
-          netUsdFlow,
-          tradesCount,
-          timestamp: Date.now(),
-        },
-      ]
-
-      return { buyVolumeUsd, sellVolumeUsd, netUsdFlow }
+      console.log(`[BITQUERY-EAP] ✅ Successfully updated metrics with real transaction data`)
     } else {
-      console.log(`[BITQUERY-EAP] ❌ API RETURNED ERROR:`, data.error)
-      throw new Error(`Bitquery EAP API returned error: ${data.error}`)
+      console.log(`[BITQUERY-EAP] ⚠️ Invalid response format:`, data)
+      throw new Error("Invalid response format from EAP API")
     }
   } catch (error) {
-    console.error("[BITQUERY-EAP] ❌ COMPLETE FAILURE:", error)
-    console.error("[BITQUERY-EAP] Error details:", {
-      message: error.message,
-      stack: error.stack,
-      config: autoSellState.config ? "exists" : "null",
-      mint: autoSellState.config?.mint || "undefined",
-    })
-
-    autoSellState.lastDataUpdateTime = Date.now()
-
-    autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
-
-    return { buyVolumeUsd: 0, sellVolumeUsd: 0, netUsdFlow: 0 }
+    console.error(`[BITQUERY-EAP] Data collection failed:`, error)
+    throw error
   }
 }
