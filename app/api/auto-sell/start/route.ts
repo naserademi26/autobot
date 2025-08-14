@@ -74,13 +74,12 @@ const transactionClassifier = {
       `[CLASSIFIER] Raw data - API Type: ${apiType}, Token Amount: ${tokenAmount}, Price Change: ${priceChange}%, Source: ${source}`,
     )
 
-    // BULLETPROOF RULE: Use token amount direction as primary classifier
     let finalType = "unknown"
 
-    if (tokenAmount > 0) {
-      finalType = "buy" // Positive token amount = someone bought tokens
-    } else if (tokenAmount < 0) {
-      finalType = "sell" // Negative token amount = someone sold tokens
+    if (tokenAmount < 0) {
+      finalType = "buy" // Negative token amount = tokens leaving pool = someone bought
+    } else if (tokenAmount > 0) {
+      finalType = "sell" // Positive token amount = tokens entering pool = someone sold
     } else {
       // Fallback to API type only if token amount is zero
       finalType = apiType === "buy" ? "buy" : apiType === "sell" ? "sell" : "unknown"
