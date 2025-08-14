@@ -22,7 +22,18 @@ import {
   Target,
   TrendingUp,
   BarChart3,
+  ExternalLink,
 } from "lucide-react"
+
+type Trade = {
+  sig: string
+  ts: number
+  side: "buy" | "sell"
+  tokenAmount: number
+  usd: number
+  wallet?: string
+  mint: string
+}
 
 type VaultEntry = { pubkey: string; hasSecret: boolean; sk?: string }
 
@@ -34,11 +45,20 @@ interface TokenInfo {
 
 interface AutoSellConfig {
   mint: string
-  timeWindowSeconds: number // Time window for tracking buy/sell activity
-  sellPercentageOfNetFlow: number // Percentage of net USD flow to sell
-  minNetFlowUsd: number // Minimum net flow to trigger sell
+  timeWindowSeconds: number
+  sellPercentageOfNetFlow: number
+  minNetFlowUsd: number
   cooldownSeconds: number
   slippageBps: number
+}
+
+interface Transaction {
+  timestamp: number
+  wallet: string
+  tokenAmount: number
+  usdAmount: number
+  signature: string
+  type: "sell"
 }
 
 interface AutoSellStatus {
@@ -50,10 +70,11 @@ interface AutoSellStatus {
     currentPrice: number
     currentPriceUsd: number
     solPriceUsd: number
-    netUsdFlow: number // Net USD flow (buyers - sellers) in time window
-    buyVolumeUsd: number // Total buy volume in USD in time window
-    sellVolumeUsd: number // Total sell volume in USD in time window
-    lastSellTrigger: number // Timestamp of last sell trigger
+    netUsdFlow: number
+    buyVolumeUsd: number
+    sellVolumeUsd: number
+    lastSellTrigger: number
+    lastSellTime: number
   }
   walletStatus: Array<{
     name: string
@@ -63,6 +84,7 @@ interface AutoSellStatus {
     cooldownUntil: number
     lastTransactionSignature: string
   }>
+  transactionHistory: Transaction[]
 }
 
 const ENDPOINT =
@@ -103,16 +125,18 @@ export default function AutoSellDashboard() {
   const mint = useMemo(() => sanitizeMintInput(mintRaw), [mintRaw])
   const [token, setToken] = useState<TokenInfo>({})
 
+  const [recentTrades, setRecentTrades] = useState<Trade[]>([])
+
   const [config, setConfig] = useState<AutoSellConfig>({
     mint: "",
-    timeWindowSeconds: 30, // Reduced to 30 seconds for faster reaction
-    sellPercentageOfNetFlow: 25, // Sell 25% of net USD flow
-    minNetFlowUsd: 0, // Set to 0 to trigger on any positive net flow
-    cooldownSeconds: 15, // Reduced cooldown for faster execution
+    timeWindowSeconds: 30,
+    sellPercentageOfNetFlow: 25,
+    minNetFlowUsd: 0,
+    cooldownSeconds: 15,
     slippageBps: 300,
   })
 
-  // Auto-sell status
+  // Auto-sell status with real-time updates
   const [status, setStatus] = useState<AutoSellStatus>({
     isRunning: false,
     config: null,
@@ -126,13 +150,87 @@ export default function AutoSellDashboard() {
       buyVolumeUsd: 0,
       sellVolumeUsd: 0,
       lastSellTrigger: 0,
+      lastSellTime: 0,
     },
     walletStatus: [],
+    transactionHistory: [],
   })
 
   const [loading, setLoading] = useState(false)
   const [log, setLog] = useState<string>("")
   const refreshId = useRef(0)
+
+  useEffect(() => {
+    if (!mint) return
+
+    const eventSource = new EventSource(`/api/trades/stream?mint=${mint}`)
+
+    eventSource.addEventListener("snapshot", (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        setStatus((prev) => ({
+          ...prev,
+          metrics: {
+            ...prev.metrics,
+            ...data,
+          },
+          transactionHistory: data.transactionHistory || [],
+        }))
+      } catch (error) {
+        console.error("Failed to parse snapshot data:", error)
+      }
+    })
+
+    eventSource.addEventListener("update", (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        setStatus((prev) => ({
+          ...prev,
+          metrics: {
+            ...prev.metrics,
+            ...data,
+          },
+        }))
+      } catch (error) {
+        console.error("Failed to parse update data:", error)
+      }
+    })
+
+    eventSource.addEventListener("trades", (event) => {
+      try {
+        const trades: Trade[] = JSON.parse(event.data)
+        setRecentTrades((prev) => [...trades, ...prev].slice(0, 100))
+      } catch (error) {
+        console.error("Failed to parse trades data:", error)
+      }
+    })
+
+    eventSource.onerror = () => {
+      console.error("EventSource connection error")
+    }
+
+    return () => {
+      eventSource.close()
+    }
+  }, [mint])
+
+  useEffect(() => {
+    if (!mint) return
+
+    const subscribeMint = async () => {
+      try {
+        await fetch("/api/mints/subscribe", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mint }),
+        })
+      } catch (error) {
+        console.error("Failed to subscribe to mint:", error)
+      }
+    }
+
+    subscribeMint()
+  }, [mint])
 
   useEffect(() => {
     let mounted = true
@@ -159,7 +257,12 @@ export default function AutoSellDashboard() {
         const res = await fetch("/api/auto-sell/status")
         if (res.ok) {
           const data = await res.json()
-          setStatus(data)
+          setStatus((prev) => ({
+            ...prev,
+            isRunning: data.isRunning,
+            config: data.config,
+            walletStatus: data.walletStatus,
+          }))
         }
       } catch (error) {
         console.error("Failed to fetch status:", error)
@@ -267,7 +370,7 @@ export default function AutoSellDashboard() {
 
   async function startAutoSell() {
     setLoading(true)
-    setLog(`🚀 Starting market momentum auto-sell engine...`)
+    setLog(`🚀 Starting real-time market momentum auto-sell engine...`)
 
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
@@ -285,7 +388,7 @@ export default function AutoSellDashboard() {
       setLog(JSON.stringify(result, null, 2))
 
       if (res.ok) {
-        setLog(`✅ Market momentum auto-sell engine started successfully!`)
+        setLog(`✅ Real-time market momentum auto-sell engine started successfully!`)
       }
     } catch (e: any) {
       setLog(`❌ Error: ${e?.message || String(e)}`)
@@ -327,7 +430,7 @@ export default function AutoSellDashboard() {
   )
 
   const timeSinceLastSell =
-    status.metrics.lastSellTrigger > 0 ? Math.floor((Date.now() - status.metrics.lastSellTrigger) / 1000) : 0
+    status.metrics.lastSellTime > 0 ? Math.floor((Date.now() - status.metrics.lastSellTime) / 1000) : 0
 
   return (
     <div className="max-w-7xl mx-auto p-4 space-y-6 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 min-h-screen">
@@ -337,7 +440,7 @@ export default function AutoSellDashboard() {
             🤖 Market Momentum Auto-Sell
           </h1>
           <p className="text-slate-300 text-sm mt-2 font-medium">
-            Monitors market buy/sell activity and sells 25% of net positive USD flow
+            Real-time Helius monitoring • Sells 25% of net positive USD flow when Net Flow &gt; $0
           </p>
         </div>
         <div className="flex items-center gap-4">
@@ -361,9 +464,8 @@ export default function AutoSellDashboard() {
       </header>
 
       <div className="grid lg:grid-cols-3 gap-6">
-        {/* Configuration Panel */}
         <div className="lg:col-span-1 space-y-6">
-          {/* Wallet Management */}
+          {/* ... existing wallet configuration card ... */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -452,7 +554,7 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          {/* Token Configuration */}
+          {/* ... existing token configuration and control panel cards ... */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -533,7 +635,6 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          {/* Control Panel */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -690,7 +791,7 @@ export default function AutoSellDashboard() {
                   <div className="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl shadow-inner">
                     <span className="text-slate-400 font-medium">Last Sell:</span>
                     <span className="text-slate-300 font-mono font-bold text-lg">
-                      {status.metrics.lastSellTrigger > 0 ? `${timeSinceLastSell}s ago` : "Never"}
+                      {status.metrics.lastSellTime > 0 ? `${timeSinceLastSell}s ago` : "Never"}
                     </span>
                   </div>
                 </div>
@@ -712,7 +813,63 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          {/* Transaction History */}
+          <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
+            <CardHeader className="pb-4">
+              <CardTitle className="flex items-center gap-3 text-slate-100">
+                <div className="p-2 rounded-lg bg-cyan-500/30 shadow-lg">
+                  <Activity className="w-5 h-5 text-cyan-400" />
+                </div>
+                Live Trade Feed
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {recentTrades.length === 0 ? (
+                <div className="text-center py-12 text-slate-400">
+                  <Activity className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                  <p className="text-lg font-medium">No recent trades</p>
+                  <p className="text-sm">Real-time trades will appear here</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-64 overflow-auto">
+                  {recentTrades.slice(0, 20).map((trade) => (
+                    <div
+                      key={trade.sig}
+                      className="flex items-center justify-between p-3 bg-slate-800/50 rounded-lg border border-slate-700/40 hover:bg-slate-800/70 transition-colors shadow-sm"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Badge
+                          className={
+                            trade.side === "buy"
+                              ? "bg-emerald-500/30 text-emerald-400 border-emerald-500/40"
+                              : "bg-rose-500/30 text-rose-400 border-rose-500/40"
+                          }
+                        >
+                          {trade.side.toUpperCase()}
+                        </Badge>
+                        <span className="text-xs text-slate-400">{new Date(trade.ts).toLocaleTimeString()}</span>
+                      </div>
+                      <div className="flex items-center gap-4 text-sm">
+                        <span className="text-slate-300 font-mono">
+                          {trade.tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                        </span>
+                        <span className="text-slate-300 font-mono font-bold">${trade.usd.toFixed(2)}</span>
+                        <a
+                          href={`https://solscan.io/tx/${trade.sig}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-400 hover:text-blue-300 transition-colors"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* ... existing transaction history, wallet status, and system log cards ... */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -723,15 +880,56 @@ export default function AutoSellDashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-center py-12 text-slate-400">
-                <BarChart3 className="w-16 h-16 mx-auto mb-4 opacity-50" />
-                <p className="text-lg font-medium">No transactions yet</p>
-                <p className="text-sm">Sell transactions will appear here</p>
-              </div>
+              {status.transactionHistory.length === 0 ? (
+                <div className="text-center py-12 text-slate-400">
+                  <BarChart3 className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                  <p className="text-lg font-medium">No transactions yet</p>
+                  <p className="text-sm">Sell transactions will appear here</p>
+                </div>
+              ) : (
+                <div className="space-y-3 max-h-64 overflow-auto">
+                  {status.transactionHistory.map((tx, idx) => (
+                    <div
+                      key={idx}
+                      className="p-4 bg-slate-800/50 rounded-xl border border-slate-700/40 hover:bg-slate-800/70 transition-colors shadow-lg"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <Badge className="bg-rose-500/30 text-rose-400 border-rose-500/40">SELL</Badge>
+                          <span className="text-xs text-slate-400">{new Date(tx.timestamp).toLocaleTimeString()}</span>
+                        </div>
+                        <a
+                          href={`https://solscan.io/tx/${tx.signature}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-400 hover:text-blue-300 transition-colors"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </a>
+                      </div>
+                      <div className="grid grid-cols-3 gap-4 text-sm">
+                        <div>
+                          <span className="text-slate-400">Wallet:</span>
+                          <div className="font-mono text-slate-300">
+                            {tx.wallet.slice(0, 6)}...{tx.wallet.slice(-4)}
+                          </div>
+                        </div>
+                        <div>
+                          <span className="text-slate-400">Amount:</span>
+                          <div className="font-mono text-slate-300">{tx.tokenAmount.toFixed(2)} tokens</div>
+                        </div>
+                        <div>
+                          <span className="text-slate-400">USD Value:</span>
+                          <div className="font-mono text-slate-300">${tx.usdAmount.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
-          {/* Wallet Status */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -794,7 +992,6 @@ export default function AutoSellDashboard() {
             </CardContent>
           </Card>
 
-          {/* System Log */}
           <Card className="bg-slate-900/70 backdrop-blur-sm border-slate-700/60 shadow-2xl">
             <CardHeader className="pb-4">
               <CardTitle className="flex items-center gap-3 text-slate-100">
@@ -807,7 +1004,7 @@ export default function AutoSellDashboard() {
             <CardContent>
               <pre className="text-xs whitespace-pre-wrap bg-slate-950/70 border border-slate-800/60 p-4 rounded-xl max-h-48 overflow-auto font-mono text-slate-300 leading-relaxed shadow-inner">
                 {log ||
-                  `Market momentum auto-sell ready. System monitors buy/sell activity in ${config.timeWindowSeconds}s windows and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when Net Flow &gt; $0 (Buy Volume - Sell Volume).`}
+                  `Real-time market momentum auto-sell ready. System uses Helius webhooks to monitor actual blockchain transactions and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when Net Flow > $0 (Buy Volume - Sell Volume).`}
               </pre>
             </CardContent>
           </Card>
