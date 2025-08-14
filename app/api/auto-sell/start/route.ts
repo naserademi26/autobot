@@ -10,6 +10,9 @@ const autoSellState = {
   bitquerySubscription: null as any,
   botStartTime: 0, // Track when bot actually started
   firstAnalysisTime: 0, // Track when first analysis should happen
+  monitoringStartTime: 0, // When current monitoring window started
+  monitoringEndTime: 0, // When current monitoring window ends
+  lastDataUpdateTime: 0, // When data was last updated
   metrics: {
     totalBought: 0,
     totalSold: 0,
@@ -189,6 +192,10 @@ async function collectDirectSolanaTransactions() {
   const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
   const currentTime = Date.now()
   const windowStartTime = currentTime - timeWindowMs
+
+  autoSellState.monitoringStartTime = windowStartTime
+  autoSellState.monitoringEndTime = currentTime
+  autoSellState.lastDataUpdateTime = currentTime
 
   console.log(`[SOLANA-RPC] 🔍 DEBUGGING TRANSACTION DETECTION`)
   console.log(`[SOLANA-RPC] Token mint: ${autoSellState.config.mint}`)
@@ -1100,15 +1107,24 @@ async function collectDexScreenerData() {
 
 async function collectBitqueryEAPData() {
   if (!autoSellState.config) {
-    console.error("[BITQUERY-EAP] Error: autoSellState.config is null")
-    return
+    console.error("[BITQUERY-EAP] Data collection failed: Config is null")
+    return { buyVolumeUsd: 0, sellVolumeUsd: 0, netUsdFlow: 0 }
   }
 
   try {
-    console.log("[BITQUERY-EAP] Using Bitquery EAP API for real-time DEX data")
-
-    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
+    const timeWindowSeconds = autoSellState.config.timeWindowSeconds || 30
     const mint = autoSellState.config.mint
+
+    const currentTime = Date.now()
+    const windowStartTime = currentTime - timeWindowSeconds * 1000
+    autoSellState.monitoringStartTime = windowStartTime
+    autoSellState.monitoringEndTime = currentTime
+    autoSellState.lastDataUpdateTime = currentTime
+
+    console.log(`[BITQUERY-EAP] Collecting data for ${mint} over ${timeWindowSeconds}s window`)
+    console.log(
+      `[BITQUERY-EAP] Window: ${new Date(windowStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
+    )
 
     // Call our EAP API endpoint
     const response = await fetch(`/api/eap?mints=${mint}&seconds=${timeWindowSeconds}`)
@@ -1148,6 +1164,7 @@ async function collectBitqueryEAPData() {
     }
   } catch (error) {
     console.error("[BITQUERY-EAP] Data collection failed:", error)
-    throw error
+    autoSellState.lastDataUpdateTime = Date.now()
+    return { buyVolumeUsd: 0, sellVolumeUsd: 0, netUsdFlow: 0 }
   }
 }

@@ -44,6 +44,9 @@ interface AutoSellConfig {
 interface AutoSellStatus {
   isRunning: boolean
   config: AutoSellConfig | null
+  monitoringStartTime?: number
+  monitoringEndTime?: number
+  lastDataUpdateTime?: number
   metrics: {
     totalBought: number
     totalSold: number
@@ -654,6 +657,39 @@ export default function AutoSellDashboard() {
                   <Activity className="w-5 h-5 text-green-400" />
                 </div>
                 Market Activity Monitor
+                {status.monitoringStartTime && status.monitoringEndTime && (
+                  <div className="ml-auto text-xs text-slate-400 font-mono">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-3 h-3" />
+                      <span>
+                        {new Date(status.monitoringStartTime).toLocaleTimeString("en-US", {
+                          hour12: false,
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })}{" "}
+                        →{" "}
+                        {new Date(status.monitoringEndTime).toLocaleTimeString("en-US", {
+                          hour12: false,
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })}
+                      </span>
+                    </div>
+                    {status.lastDataUpdateTime && (
+                      <div className="text-center mt-1">
+                        Last update:{" "}
+                        {new Date(status.lastDataUpdateTime).toLocaleTimeString("en-US", {
+                          hour12: false,
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -695,6 +731,29 @@ export default function AutoSellDashboard() {
                   </div>
                 </div>
               </div>
+
+              {status.monitoringStartTime && status.monitoringEndTime && (
+                <div className="mt-4 p-3 bg-slate-800/30 rounded-xl border border-slate-700/40">
+                  <div className="text-xs text-slate-400 text-center">
+                    <div className="font-medium mb-1">Monitoring Window ({config.timeWindowSeconds}s)</div>
+                    <div className="font-mono">
+                      {new Date(status.monitoringStartTime).toLocaleTimeString("en-US", {
+                        hour12: false,
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}{" "}
+                      →{" "}
+                      {new Date(status.monitoringEndTime).toLocaleTimeString("en-US", {
+                        hour12: false,
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {status.metrics.netUsdFlow > 0 && status.metrics.buyVolumeUsd > 0 && (
                 <div className="mt-6 p-4 bg-gradient-to-r from-emerald-500/20 to-green-500/20 border border-emerald-500/40 rounded-xl shadow-xl">
