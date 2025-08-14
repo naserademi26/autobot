@@ -1112,8 +1112,8 @@ async function updateSolPrice() {
 
 async function collectDexScreenerData() {
   if (!autoSellState.config) {
-    console.log(`[DEXSCREENER] ❌ Config not available`)
-    return { success: false, error: "Config not available" }
+    console.log(`[DEXSCREENER] ❌ No config available`)
+    return { success: false, error: "No config" }
   }
 
   const { mint, timeWindowSeconds } = autoSellState.config
@@ -1121,28 +1121,29 @@ async function collectDexScreenerData() {
   try {
     console.log(`[DEXSCREENER] 🔍 Fetching data for mint: ${mint}`)
 
-    // Get pair data
-    const pairResponse = await safeFetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
-      timeout: 10000,
+    const response = await safeFetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
+      timeout: 15000,
     })
 
-    if (!pairResponse?.ok) {
-      throw new Error(`Pair API failed: ${pairResponse?.status}`)
+    if (!response?.ok) {
+      throw new Error(`HTTP ${response?.status}`)
     }
 
-    const pairData = await pairResponse.json()
-    const pair = pairData.pairs?.[0]
+    const data = await response.json()
+    const pairs = data.pairs || []
 
-    if (!pair) {
-      throw new Error("No pair data found")
+    if (pairs.length === 0) {
+      throw new Error("No trading pairs found")
     }
 
-    // Update current price
-    const currentPrice = Number(pair.priceUsd || 0)
-    if (currentPrice > 0) {
-      autoSellState.metrics.currentPriceUsd = currentPrice
-      console.log(`[DEXSCREENER] 💰 Updated price: $${currentPrice.toFixed(8)}`)
-    }
+    // Find the most liquid pair
+    const pair = pairs.reduce((best: any, current: any) => {
+      const bestLiquidity = Number(best.liquidity?.usd || 0)
+      const currentLiquidity = Number(current.liquidity?.usd || 0)
+      return currentLiquidity > bestLiquidity ? current : best
+    })
+
+    console.log(`[DEXSCREENER] 📊 Using pair: ${pair.pairAddress} (${pair.dexId})`)
 
     let totalBuyVolumeUsd = 0
     let totalSellVolumeUsd = 0
@@ -1163,6 +1164,9 @@ async function collectDexScreenerData() {
         const windowStartTime = Date.now() - timeWindowSeconds * 1000
 
         console.log(`[DEXSCREENER] 📊 Processing ${txData.data?.length || 0} transactions`)
+        console.log(
+          `[DEXSCREENER] 🕐 Time window: ${new Date(windowStartTime).toLocaleTimeString()} to ${new Date().toLocaleTimeString()}`,
+        )
 
         for (const tx of txData.data || []) {
           const txTime = new Date(tx.timeStamp).getTime()
@@ -1171,62 +1175,70 @@ async function collectDexScreenerData() {
           if (txTime >= windowStartTime) {
             const usdAmount = Number(tx.amountUSD || 0)
 
+            console.log(`[DEXSCREENER] 🔍 RAW TRANSACTION:`)
+            console.log(`[DEXSCREENER] - Type: "${tx.type}"`)
+            console.log(`[DEXSCREENER] - Amount USD: $${usdAmount.toFixed(4)}`)
+            console.log(`[DEXSCREENER] - Time: ${new Date(txTime).toLocaleTimeString()}`)
+            console.log(`[DEXSCREENER] - Raw data:`, JSON.stringify(tx, null, 2))
+
             if (usdAmount > 0.001) {
-              if (tx.type === "buy") {
+              const actualType = tx.type
+
+              // Check if DexScreener is returning reversed transaction types
+              // If the transaction shows as "sell" but the amount is positive and recent, it might be misclassified
+              if (tx.type === "sell" && usdAmount > 0.5) {
+                console.log(`[DEXSCREENER] ⚠️ POTENTIAL TYPE REVERSAL: Large "sell" might actually be buy`)
+                // Don't reverse automatically, but log for debugging
+              }
+
+              if (actualType === "buy") {
                 totalBuyVolumeUsd += usdAmount
                 buyCount++
-                console.log(`[DEXSCREENER] ✅ BUY: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`)
-              } else if (tx.type === "sell") {
+                console.log(
+                  `[DEXSCREENER] ✅ CLASSIFIED AS BUY: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`,
+                )
+              } else if (actualType === "sell") {
                 totalSellVolumeUsd += usdAmount
                 sellCount++
                 console.log(
-                  `[DEXSCREENER] ❌ SELL: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`,
+                  `[DEXSCREENER] ❌ CLASSIFIED AS SELL: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`,
                 )
+              } else {
+                console.log(`[DEXSCREENER] ❓ UNKNOWN TYPE: "${actualType}" - $${usdAmount.toFixed(4)}`)
               }
             }
+          } else {
+            console.log(`[DEXSCREENER] ⏰ Transaction outside time window: ${new Date(txTime).toLocaleTimeString()}`)
           }
         }
       }
     } catch (txError) {
-      console.log(`[DEXSCREENER] ⚠️ Transaction data unavailable, using volume estimation`)
+      console.log(`[DEXSCREENER] ⚠️ Transaction data unavailable: ${txError.message}`)
     }
 
-    // If no transaction data, use volume estimation
-    if (totalBuyVolumeUsd === 0 && totalSellVolumeUsd === 0) {
-      const volume24h = Number(pair.volume?.h24 || 0)
-      const priceChange24h = Number(pair.priceChange?.h24 || 0)
-
-      // Scale volume to time window
-      const scaledVolume = (volume24h / 24) * (timeWindowSeconds / 3600)
-
-      if (priceChange24h > 2) {
-        // Positive price movement = more buying
-        totalBuyVolumeUsd = scaledVolume * 0.7
-        totalSellVolumeUsd = scaledVolume * 0.3
-      } else if (priceChange24h < -2) {
-        // Negative price movement = more selling
-        totalBuyVolumeUsd = scaledVolume * 0.3
-        totalSellVolumeUsd = scaledVolume * 0.7
-      } else {
-        // Neutral movement = balanced
-        totalBuyVolumeUsd = scaledVolume * 0.5
-        totalSellVolumeUsd = scaledVolume * 0.5
-      }
-
-      console.log(`[DEXSCREENER] 📈 Volume estimation based on price change: ${priceChange24h.toFixed(2)}%`)
-    }
+    // If no real transaction data, don't create artificial volumes
 
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
+    console.log(`[DEXSCREENER] 🎯 FINAL ASSIGNMENT:`)
+    console.log(`[DEXSCREENER] - autoSellState.metrics.buyVolumeUsd = $${totalBuyVolumeUsd.toFixed(4)}`)
+    console.log(`[DEXSCREENER] - autoSellState.metrics.sellVolumeUsd = $${totalSellVolumeUsd.toFixed(4)}`)
+    console.log(`[DEXSCREENER] - autoSellState.metrics.netUsdFlow = $${autoSellState.metrics.netUsdFlow.toFixed(4)}`)
     console.log(
-      `[DEXSCREENER] 📊 FINAL RESULTS: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      `[DEXSCREENER] 📊 SUMMARY: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
     )
 
-    return { success: true }
+    return {
+      success: true,
+      buyVolumeUsd: totalBuyVolumeUsd,
+      sellVolumeUsd: totalSellVolumeUsd,
+      netUsdFlow: autoSellState.metrics.netUsdFlow,
+      transactionCount: buyCount + sellCount,
+    }
   } catch (error) {
-    console.error(`[DEXSCREENER] ❌ Error:`, error)
+    console.error(`[DEXSCREENER] ❌ Data collection failed:`, error)
     return { success: false, error: error.message }
   }
 }
