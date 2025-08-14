@@ -40,8 +40,10 @@ export async function POST(req: NextRequest) {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          ...cfg,
+          webhookURL: cfg.webhookURL,
+          transactionTypes: cfg.transactionTypes || ["SWAP"],
           accountAddresses: list,
+          webhookType: cfg.webhookType || "enhanced",
         }),
       })
 
