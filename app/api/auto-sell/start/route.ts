@@ -214,91 +214,96 @@ async function collectDirectSolanaTransactions() {
     { commitment: "confirmed" },
   )
 
-  const monitoringStartTime = autoSellState.firstAnalysisTime
+  const monitoringStartTime = autoSellState.botStartTime
   const currentTime = Date.now()
 
   console.log(
-    `[SOLANA-RPC] Monitoring NEW transactions from ${new Date(monitoringStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
+    `[SOLANA-RPC] Monitoring transactions from ${new Date(monitoringStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
   )
 
   try {
     const jupiterV6 = new PublicKey("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")
     const raydiumV4 = new PublicKey("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+    const raydiumCLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUQpMDdHFWmChgoqRzx")
+    const orcaWhirlpool = new PublicKey("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
 
     let totalBuyVolumeUsd = 0
     let totalSellVolumeUsd = 0
     let buyCount = 0
     let sellCount = 0
-    const processedTransactions = []
+    const processedTransactions = new Set()
 
-    for (const programId of [jupiterV6, raydiumV4]) {
-      const signatures = await connection.getSignaturesForAddress(programId, {
-        limit: 50,
-        before: undefined,
-      })
+    for (const programId of [jupiterV6, raydiumV4, raydiumCLMM, orcaWhirlpool]) {
+      try {
+        const signatures = await connection.getSignaturesForAddress(programId, {
+          limit: 100, // Increased from 50 to 100
+          before: undefined,
+        })
 
-      console.log(`[SOLANA-RPC] Found ${signatures.length} signatures for ${programId.toBase58().substring(0, 8)}...`)
+        console.log(`[SOLANA-RPC] Found ${signatures.length} signatures for ${programId.toBase58().substring(0, 8)}...`)
 
-      for (const sigInfo of signatures) {
-        const txTime = (sigInfo.blockTime || 0) * 1000
+        for (const sigInfo of signatures) {
+          const txTime = (sigInfo.blockTime || 0) * 1000
 
-        if (txTime < monitoringStartTime) {
-          continue
-        }
+          if (txTime < monitoringStartTime) {
+            continue
+          }
 
-        try {
-          const tx = await connection.getTransaction(sigInfo.signature, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0,
-          })
+          if (processedTransactions.has(sigInfo.signature)) {
+            continue
+          }
 
-          if (!tx || !tx.meta) continue
-
-          const tradeInfo = analyzeTokenSwapTransaction(tx, autoSellState.config.mint)
-
-          if (tradeInfo) {
-            const isDuplicate = processedTransactions.some((t) => t.signature === tradeInfo.signature)
-            if (isDuplicate) continue
-
-            processedTransactions.push({
-              signature: tradeInfo.signature,
-              type: tradeInfo.type,
-              usdAmount: tradeInfo.usdAmount,
-              timestamp: txTime,
+          try {
+            const tx = await connection.getTransaction(sigInfo.signature, {
+              commitment: "confirmed",
+              maxSupportedTransactionVersion: 0,
             })
 
-            if (tradeInfo.type === "buy") {
-              totalBuyVolumeUsd += tradeInfo.usdAmount
-              buyCount++
-              console.log(
-                `[SOLANA-RPC] ✅ BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
-              )
-            } else if (tradeInfo.type === "sell") {
-              totalSellVolumeUsd += tradeInfo.usdAmount
-              sellCount++
-              console.log(
-                `[SOLANA-RPC] ❌ SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
-              )
+            if (!tx || !tx.meta) continue
+
+            const tradeInfo = analyzeTokenSwapTransaction(tx, autoSellState.config.mint)
+
+            if (tradeInfo && tradeInfo.usdAmount > 0.1) {
+              // Minimum $0.10 to filter noise
+              processedTransactions.add(sigInfo.signature)
+
+              if (tradeInfo.type === "buy") {
+                totalBuyVolumeUsd += tradeInfo.usdAmount
+                buyCount++
+                console.log(
+                  `[SOLANA-RPC] ✅ BUY: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+                )
+              } else if (tradeInfo.type === "sell") {
+                totalSellVolumeUsd += tradeInfo.usdAmount
+                sellCount++
+                console.log(
+                  `[SOLANA-RPC] ❌ SELL: $${tradeInfo.usdAmount.toFixed(2)} at ${new Date(txTime).toISOString()} (${sigInfo.signature.substring(0, 8)}...)`,
+                )
+              }
             }
+          } catch (txError) {
+            // Skip failed transactions
+            continue
           }
-        } catch (txError) {
-          continue
         }
+      } catch (programError) {
+        console.error(`[SOLANA-RPC] Error processing ${programId.toBase58()}:`, programError.message)
+        continue
       }
     }
 
-    autoSellState.marketTrades = processedTransactions
+    autoSellState.marketTrades = Array.from(processedTransactions).map((sig) => ({ signature: sig }))
 
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
     console.log(
-      `[SOLANA-RPC] 📊 REAL TRADING DATA SINCE ${new Date(monitoringStartTime).toISOString()} - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
+      `[SOLANA-RPC] 📊 REAL TRADING DATA SINCE BOT START - Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(2)}`,
     )
 
     if (buyCount === 0 && sellCount === 0) {
-      console.log("[SOLANA-RPC] ✅ No new trading activity since monitoring started - showing accurate $0 volumes")
+      console.log("[SOLANA-RPC] ✅ No new trading activity since bot started - showing accurate $0 volumes")
     }
   } catch (error) {
     console.error("[SOLANA-RPC] Error collecting transaction data:", error)
@@ -317,6 +322,7 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
     let solBalanceChange = 0
     let foundTokenAccount = false
 
+    // Check pre and post token balances
     for (let i = 0; i < tx.meta.preTokenBalances.length; i++) {
       const preBalance = tx.meta.preTokenBalances[i]
       const postBalance = tx.meta.postTokenBalances.find((post: any) => post.accountIndex === preBalance.accountIndex)
@@ -324,11 +330,13 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
       if (preBalance.mint === tokenMintPubkey && postBalance) {
         const preAmount = Number(preBalance.uiTokenAmount?.uiAmount || 0)
         const postAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
-        tokenBalanceChange += postAmount - preAmount
+        const change = postAmount - preAmount
+        tokenBalanceChange += change
         foundTokenAccount = true
       }
     }
 
+    // Check for new token accounts created
     for (const postBalance of tx.meta.postTokenBalances) {
       if (postBalance.mint === tokenMintPubkey) {
         const hasPreBalance = tx.meta.preTokenBalances.some((pre: any) => pre.accountIndex === postBalance.accountIndex)
@@ -347,10 +355,13 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
       (post: number, index: number) => post - tx.meta.preBalances[index],
     )
 
-    const maxSolChange = Math.max(...solBalanceChanges.map(Math.abs))
-    if (maxSolChange > 5000) {
-      // Ignore small fee changes
-      solBalanceChange = solBalanceChanges.find((change: number) => Math.abs(change) === maxSolChange) || 0
+    // Find the largest SOL change (excluding small fee changes)
+    const significantSolChanges = solBalanceChanges.filter((change: number) => Math.abs(change) > 10000) // > 0.00001 SOL
+    if (significantSolChanges.length > 0) {
+      solBalanceChange = significantSolChanges.reduce(
+        (max: number, change: number) => (Math.abs(change) > Math.abs(max) ? change : max),
+        0,
+      )
     }
 
     const solAmount = Math.abs(solBalanceChange) / 1e9
@@ -359,7 +370,8 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
 
     const type = tokenBalanceChange > 0 ? "buy" : "sell"
 
-    if (usdAmount < 0.1) {
+    if (usdAmount < 0.5) {
+      // Minimum $0.50 to reduce noise
       return null
     }
 
