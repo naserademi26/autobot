@@ -6,11 +6,37 @@ function encoder(s: string) {
   return new TextEncoder().encode(s)
 }
 
+let redis: any = null
+async function getRedis() {
+  if (!redis) {
+    try {
+      const { Redis } = await import("@upstash/redis")
+      redis = Redis.fromEnv()
+    } catch (error) {
+      console.warn("Redis not available:", error)
+      return null
+    }
+  }
+  return redis
+}
+
 export async function GET(req: NextRequest) {
   const mint = req.nextUrl.searchParams.get("mint") || process.env.TOKEN_MINT!
+  const redisClient = await getRedis()
 
   const stream = new ReadableStream({
     start: async (controller) => {
+      if (redisClient) {
+        try {
+          const recentTrades = await redisClient.lrange(`trades:${mint}`, 0, 19) // Last 20 trades
+          const trades = recentTrades.map((trade: string) => JSON.parse(trade))
+
+          controller.enqueue(encoder(`event: trades\ndata: ${JSON.stringify(trades)}\n\n`))
+        } catch (error) {
+          console.warn("Failed to fetch recent trades:", error)
+        }
+      }
+
       // Send current auto-sell state as snapshot
       if (global.autoSellState) {
         controller.enqueue(
@@ -27,8 +53,8 @@ export async function GET(req: NextRequest) {
         )
       }
 
-      // Keep connection alive and send updates
-      const interval = setInterval(() => {
+      const interval = setInterval(async () => {
+        // Send updated metrics
         if (global.autoSellState) {
           controller.enqueue(
             encoder(
@@ -44,9 +70,21 @@ export async function GET(req: NextRequest) {
           )
         }
 
+        if (redisClient) {
+          try {
+            const latestTrades = await redisClient.lrange(`trades:${mint}`, 0, 4) // Last 5 trades
+            if (latestTrades.length > 0) {
+              const trades = latestTrades.map((trade: string) => JSON.parse(trade))
+              controller.enqueue(encoder(`event: newTrades\ndata: ${JSON.stringify(trades)}\n\n`))
+            }
+          } catch (error) {
+            console.warn("Failed to fetch latest trades:", error)
+          }
+        }
+
         // Keepalive ping
         controller.enqueue(encoder(`: ping ${Date.now()}\n\n`))
-      }, 2000)
+      }, 1000) // Reduced interval to 1 second for more responsive updates
 
       return () => clearInterval(interval)
     },

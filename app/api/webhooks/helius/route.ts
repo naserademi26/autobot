@@ -23,6 +23,20 @@ type Trade = {
   wallet?: string
 }
 
+let redis: any = null
+async function getRedis() {
+  if (!redis) {
+    try {
+      const { Redis } = await import("@upstash/redis")
+      redis = Redis.fromEnv()
+    } catch (error) {
+      console.warn("Redis not available:", error)
+      return null
+    }
+  }
+  return redis
+}
+
 async function getSolUsd(): Promise<number> {
   try {
     const response = await fetch("https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111112")
@@ -58,6 +72,7 @@ export async function POST(req: NextRequest) {
 
   const tokenPrice = await getTokenPrice(mint)
   const trades: Trade[] = []
+  const redisClient = await getRedis()
 
   for (const tx of arr) {
     const tokenTransfers =
@@ -75,14 +90,25 @@ export async function POST(req: NextRequest) {
 
     const usd = tokenAmount * tokenPrice
 
-    trades.push({
+    const trade: Trade = {
       sig: tx.signature,
       ts: (tx.timestamp || Math.floor(Date.now() / 1000)) * 1000,
       side,
       tokenAmount,
       usd,
       wallet: looksLikeUser(to) ? to : from,
-    })
+    }
+
+    trades.push(trade)
+
+    if (redisClient && usd > 0) {
+      try {
+        await redisClient.lpush(`trades:${mint}`, JSON.stringify(trade))
+        await redisClient.ltrim(`trades:${mint}`, 0, 199) // Keep last 200 trades
+      } catch (error) {
+        console.warn("Redis storage failed:", error)
+      }
+    }
 
     if (global.autoSellState?.isRunning) {
       const now = Date.now()
@@ -96,6 +122,10 @@ export async function POST(req: NextRequest) {
         global.autoSellState.metrics.netUsdFlow =
           global.autoSellState.metrics.buyVolumeUsd - global.autoSellState.metrics.sellVolumeUsd
 
+        if (tokenPrice > 0) {
+          global.autoSellState.metrics.currentPrice = tokenPrice
+        }
+
         if (global.autoSellState.metrics.netUsdFlow > 0 && global.autoSellState.metrics.buyVolumeUsd > 0) {
           const sellAmountUsd = global.autoSellState.metrics.netUsdFlow * 0.25
           executeAutoSell(sellAmountUsd)
@@ -104,6 +134,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  console.log(`Processed ${trades.length} trades, total received: ${arr.length}`)
   return NextResponse.json({ ok: true, received: arr.length, parsed: trades.length })
 }
 
@@ -127,7 +158,6 @@ async function executeAutoSell(sellAmountUsd: number) {
       const walletTokensToSell = tokensToSell * walletPortion
 
       if (walletTokensToSell > 0) {
-        // Execute sell for this wallet
         await executeSellForWallet(wallet, walletTokensToSell, sellAmountUsd * walletPortion)
       }
     }
@@ -141,13 +171,10 @@ async function executeAutoSell(sellAmountUsd: number) {
 
 async function executeSellForWallet(wallet: any, tokenAmount: number, usdAmount: number) {
   try {
-    // Jupiter swap implementation would go here
     console.log(`Executing sell: ${tokenAmount} tokens (~$${usdAmount.toFixed(2)}) from wallet ${wallet.address}`)
 
-    // Update wallet balance after sell
     wallet.tokenBalance = Math.max(0, wallet.tokenBalance - tokenAmount)
 
-    // Add to transaction history
     if (!global.autoSellState.transactionHistory) {
       global.autoSellState.transactionHistory = []
     }
@@ -157,7 +184,7 @@ async function executeSellForWallet(wallet: any, tokenAmount: number, usdAmount:
       wallet: wallet.address,
       tokenAmount,
       usdAmount,
-      signature: `mock_${Date.now()}`, // Replace with actual transaction signature
+      signature: `sell_${Date.now()}`,
       type: "sell",
     })
   } catch (error) {

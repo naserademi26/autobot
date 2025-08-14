@@ -199,9 +199,22 @@ export default function AutoSellDashboard() {
     eventSource.addEventListener("trades", (event) => {
       try {
         const trades: Trade[] = JSON.parse(event.data)
-        setRecentTrades((prev) => [...trades, ...prev].slice(0, 100))
+        setRecentTrades(trades)
       } catch (error) {
         console.error("Failed to parse trades data:", error)
+      }
+    })
+
+    eventSource.addEventListener("newTrades", (event) => {
+      try {
+        const newTrades: Trade[] = JSON.parse(event.data)
+        setRecentTrades((prev) => {
+          const combined = [...newTrades, ...prev]
+          const unique = combined.filter((trade, index, arr) => arr.findIndex((t) => t.sig === trade.sig) === index)
+          return unique.slice(0, 100)
+        })
+      } catch (error) {
+        console.error("Failed to parse new trades data:", error)
       }
     })
 
