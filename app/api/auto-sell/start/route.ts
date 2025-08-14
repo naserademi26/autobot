@@ -294,14 +294,19 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
       return null
     }
 
-    // Find token balance changes for our specific mint
     const preTokenBalances = tx.meta.preTokenBalances || []
     const postTokenBalances = tx.meta.postTokenBalances || []
+    const preBalances = tx.meta.preBalances || []
+    const postBalances = tx.meta.postBalances || []
 
-    let tokenBalanceChange = 0
-    let solBalanceChange = 0
+    let netTokenChange = 0
+    let netSolChange = 0
+    let hasTokenActivity = false
 
-    // Check token balance changes for our mint
+    // Track all token balance changes for our mint
+    const tokenChanges = new Map()
+
+    // Process existing token accounts
     for (const preBalance of preTokenBalances) {
       if (preBalance.mint === tokenMint) {
         const postBalance = postTokenBalances.find(
@@ -310,77 +315,105 @@ function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
         if (postBalance) {
           const preAmount = Number(preBalance.uiTokenAmount?.uiAmount || 0)
           const postAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
-          tokenBalanceChange += postAmount - preAmount
+          const change = postAmount - preAmount
+
+          if (Math.abs(change) > 0.001) {
+            tokenChanges.set(preBalance.accountIndex, change)
+            netTokenChange += change
+            hasTokenActivity = true
+          }
         }
       }
     }
 
-    // Also check for new token accounts (when someone buys for the first time)
+    // Process new token accounts (first-time buyers)
     for (const postBalance of postTokenBalances) {
       if (postBalance.mint === tokenMint) {
         const preBalance = preTokenBalances.find(
           (pre: any) => pre.accountIndex === postBalance.accountIndex && pre.mint === tokenMint,
         )
         if (!preBalance) {
-          // New token account created, this is a buy
-          tokenBalanceChange += Number(postBalance.uiTokenAmount?.uiAmount || 0)
+          const amount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
+          if (amount > 0.001) {
+            tokenChanges.set(postBalance.accountIndex, amount)
+            netTokenChange += amount
+            hasTokenActivity = true
+          }
         }
       }
     }
 
-    // If no significant token balance change, fall back to SOL analysis
-    if (Math.abs(tokenBalanceChange) < 0.001) {
-      const solBalanceChanges = tx.meta.postBalances.map(
-        (post: number, index: number) => post - tx.meta.preBalances[index],
-      )
+    // Calculate SOL changes for accounts involved in token activity
+    if (hasTokenActivity) {
+      tokenChanges.forEach((tokenChange, accountIndex) => {
+        const solPre = preBalances[accountIndex] || 0
+        const solPost = postBalances[accountIndex] || 0
+        const solChange = (solPost - solPre) / 1e9
 
-      let maxSolChange = 0
-      solBalanceChanges.forEach((change: number) => {
-        if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 10000) {
-          maxSolChange = change
+        // Only count significant SOL changes
+        if (Math.abs(solChange) > 0.001) {
+          netSolChange += solChange
         }
       })
-
-      solBalanceChange = maxSolChange / 1e9
     }
 
     const solPriceUsd = autoSellState.metrics.solPriceUsd || 100
     let usdAmount = 0
     let type = ""
 
-    if (Math.abs(tokenBalanceChange) >= 0.001) {
-      // Use token balance change to determine type
-      // Positive token balance change = receiving tokens = buying
-      // Negative token balance change = sending tokens = selling
-      type = tokenBalanceChange > 0 ? "buy" : "sell"
+    if (hasTokenActivity && Math.abs(netTokenChange) >= 0.001) {
+      // Primary classification: based on net token flow
+      // Positive net token change = more tokens received overall = BUY
+      // Negative net token change = more tokens sent overall = SELL
+      type = netTokenChange > 0 ? "buy" : "sell"
 
-      // Estimate USD value from token amount and current price
+      // Cross-validate with SOL flow (should be opposite direction)
+      const expectedSolFlow = netTokenChange > 0 ? "negative" : "positive"
+      const actualSolFlow = netSolChange < 0 ? "negative" : "positive"
+
+      if (expectedSolFlow !== actualSolFlow && Math.abs(netSolChange) > 0.01) {
+        console.log(
+          `[ANALYSIS] Warning: Token flow (${type}) doesn't match SOL flow direction for ${tx.transaction.signatures[0].substring(0, 8)}`,
+        )
+      }
+
+      // Calculate USD value from token amount
       const tokenPriceUsd = autoSellState.metrics.currentPriceUsd || 0.000001
-      usdAmount = Math.abs(tokenBalanceChange) * tokenPriceUsd
-    } else if (Math.abs(solBalanceChange) >= 0.00001) {
-      // Fall back to SOL balance analysis
+      usdAmount = Math.abs(netTokenChange) * tokenPriceUsd
+
+      // If token price is unreliable, use SOL value as backup
+      if (tokenPriceUsd < 0.0000001 && Math.abs(netSolChange) > 0.001) {
+        usdAmount = Math.abs(netSolChange) * solPriceUsd
+      }
+    } else if (Math.abs(netSolChange) >= 0.001) {
+      // Fallback: classify based on SOL flow only
       // Negative SOL change = spending SOL = buying tokens
       // Positive SOL change = receiving SOL = selling tokens
-      type = solBalanceChange < 0 ? "buy" : "sell"
-      usdAmount = Math.abs(solBalanceChange) * solPriceUsd
+      type = netSolChange < 0 ? "buy" : "sell"
+      usdAmount = Math.abs(netSolChange) * solPriceUsd
     } else {
       return null
     }
 
     // Only process transactions with meaningful USD value
-    if (usdAmount < 0.1) {
+    if (usdAmount < 0.5) {
       return null
     }
 
+    console.log(
+      `[ANALYSIS] ${type.toUpperCase()}: Token Δ${netTokenChange.toFixed(4)}, SOL Δ${netSolChange.toFixed(4)}, $${usdAmount.toFixed(2)} (${tx.transaction.signatures[0].substring(0, 8)})`,
+    )
+
     return {
       type,
-      solAmount: Math.abs(solBalanceChange),
-      tokenAmount: Math.abs(tokenBalanceChange),
+      solAmount: Math.abs(netSolChange),
+      tokenAmount: Math.abs(netTokenChange),
       usdAmount,
       signature: tx.transaction.signatures[0],
       isJupiterTx: true,
     }
   } catch (error) {
+    console.error("[ANALYSIS] Transaction analysis error:", error)
     return null
   }
 }
@@ -472,7 +505,7 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
       await updateAllWalletBalances()
       const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
-      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
+      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens across wallets: ${totalTokens.toFixed(2)}`)
 
       console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
       await executeCoordinatedSell(sellAmountUsd)
