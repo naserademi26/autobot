@@ -1120,17 +1120,16 @@ async function collectBitqueryEAPData() {
     const data = await response.json()
 
     if (data.ok) {
-      const buyVolumeUsd = Number(data.buyers_usd || 0)
-      const sellVolumeUsd = Number(data.sellers_usd || 0)
-      const netUsdFlow = Number(data.net_usd || 0)
-      const tradesCount = Number(data.trades_count || 0)
+      const buyVolumeUsd = Number(data.sellers_usd || 0)
+      const sellVolumeUsd = Number(data.buyers_usd || 0)
+      const netUsdFlow = buyVolumeUsd - sellVolumeUsd // Recalculate with corrected values
 
       autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
       autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
       autoSellState.metrics.netUsdFlow = netUsdFlow
 
       console.log(
-        `[BITQUERY-EAP] ✅ REAL-TIME DATA: Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)} | Trades: ${tradesCount}`,
+        `[BITQUERY-EAP] ✅ REAL-TIME DATA: Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)} | Trades: ${Number(data.trades_count || 0)}`,
       )
 
       // Store trade data for display
@@ -1140,7 +1139,7 @@ async function collectBitqueryEAPData() {
           buyVolumeUsd,
           sellVolumeUsd,
           netUsdFlow,
-          tradesCount,
+          tradesCount: Number(data.trades_count || 0),
           timestamp: Date.now(),
         },
       ]
