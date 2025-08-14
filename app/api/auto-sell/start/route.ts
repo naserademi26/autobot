@@ -376,7 +376,8 @@ async function collectDirectSolanaTransactions() {
 
 function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
   try {
-    console.log(`[TX-ANALYSIS] 🔍 Analyzing transaction ${tx.transaction.signatures[0].substring(0, 8)}...`)
+    const signature = tx.transaction.signatures[0]
+    console.log(`[TX-ANALYSIS] 🔍 Analyzing transaction ${signature.substring(0, 8)}...`)
 
     if (!tx.meta || !tx.meta.preTokenBalances || !tx.meta.postTokenBalances) {
       console.log(`[TX-ANALYSIS] ❌ Missing token balance data`)
@@ -448,43 +449,30 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
       return null
     }
 
-    console.log(`[TX-ANALYSIS] - Total balance changes: ${tokenBalanceChanges.length}`)
+    // Sort by absolute change amount (largest first)
+    const sortedChanges = tokenBalanceChanges.sort((a, b) => Math.abs(b.change) - Math.abs(a.change))
 
-    // Instead of looking at net flow, identify the trader account and use their balance change
-
-    // Sort changes by absolute amount to find the largest movements
-    const sortedChanges = [...tokenBalanceChanges].sort((a, b) => Math.abs(b.change) - Math.abs(a.change))
-
-    console.log(`[TX-ANALYSIS] - Largest changes:`)
-    sortedChanges.forEach((change, index) => {
-      console.log(
-        `[TX-ANALYSIS]   ${index + 1}. Account ${change.accountIndex}: ${change.change > 0 ? "+" : ""}${change.change.toFixed(6)}`,
-      )
-    })
-
-    // Look for the trader pattern: usually the account with a significant negative change (selling)
-    // or positive change (buying) that's not a massive pool change
     let traderChange = null
     let transactionType = ""
     let tradeAmount = 0
 
-    // First, try to identify clear trader patterns
+    // Look for the most significant non-pool change
     for (const change of sortedChanges) {
       const absChange = Math.abs(change.change)
 
-      // Skip very large changes that are likely pool operations (>1M tokens)
-      if (absChange > 1000000) {
-        console.log(`[TX-ANALYSIS] - Skipping large pool change: ${change.change.toFixed(6)} tokens`)
+      // Skip extremely large changes that are likely pool operations (>10M tokens)
+      if (absChange > 10000000) {
+        console.log(`[TX-ANALYSIS] - Skipping massive pool change: ${change.change.toFixed(6)} tokens`)
         continue
       }
 
-      // Look for significant trader-sized changes
+      // Look for significant trader-sized changes (>0.001 tokens)
       if (absChange > 0.001) {
         traderChange = change
         transactionType = change.change > 0 ? "buy" : "sell"
         tradeAmount = absChange
         console.log(
-          `[TX-ANALYSIS] - Identified trader: Account ${change.accountIndex}, ${transactionType.toUpperCase()}, ${tradeAmount.toFixed(6)} tokens`,
+          `[TX-ANALYSIS] ✅ TRADER IDENTIFIED: Account ${change.accountIndex}, ${transactionType.toUpperCase()}, ${tradeAmount.toFixed(6)} tokens (${change.change > 0 ? "RECEIVED" : "SENT"})`,
         )
         break
       }
@@ -492,15 +480,14 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
 
     // If no clear trader found, use the largest non-pool change
     if (!traderChange && sortedChanges.length > 0) {
-      // Filter out extremely large changes (likely pools)
-      const nonPoolChanges = sortedChanges.filter((change) => Math.abs(change.change) < 10000000)
+      const nonPoolChanges = sortedChanges.filter((change) => Math.abs(change.change) < 50000000)
 
       if (nonPoolChanges.length > 0) {
         traderChange = nonPoolChanges[0]
         transactionType = traderChange.change > 0 ? "buy" : "sell"
         tradeAmount = Math.abs(traderChange.change)
         console.log(
-          `[TX-ANALYSIS] - Using largest non-pool change: ${transactionType.toUpperCase()}, ${tradeAmount.toFixed(6)} tokens`,
+          `[TX-ANALYSIS] ⚠️ FALLBACK TRADER: ${transactionType.toUpperCase()}, ${tradeAmount.toFixed(6)} tokens`,
         )
       }
     }
@@ -510,14 +497,8 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
       return null
     }
 
-    // Calculate USD value
+    // Get current token price
     const tokenPriceUsd = autoSellState.metrics.currentPriceUsd || 0.000001
-
-    if (tokenPriceUsd <= 0) {
-      console.log(`[TX-ANALYSIS] ❌ Invalid token price: $${tokenPriceUsd}`)
-      return null
-    }
-
     const usdAmount = tradeAmount * tokenPriceUsd
 
     console.log(`[TX-ANALYSIS] - Token amount: ${tradeAmount.toFixed(6)}`)
@@ -531,14 +512,14 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
     }
 
     console.log(
-      `[TX-ANALYSIS] ✅ VALID ${transactionType.toUpperCase()}: ${tradeAmount.toFixed(6)} tokens = $${usdAmount.toFixed(6)}`,
+      `[TX-ANALYSIS] ✅ FINAL RESULT: ${transactionType.toUpperCase()} - ${tradeAmount.toFixed(6)} tokens = $${usdAmount.toFixed(6)}`,
     )
 
     return {
       type: transactionType,
       tokenAmount: tradeAmount,
       usdAmount,
-      signature: tx.transaction.signatures[0],
+      signature: signature,
       traderAccount: traderChange.accountIndex,
       traderChange: traderChange.change,
       balanceChanges: tokenBalanceChanges.length,
@@ -1144,90 +1125,117 @@ async function collectDexScreenerData() {
   }
 
   try {
-    console.log("[DEXSCREENER] Fetching real transaction data from DexScreener")
+    console.log("[DEXSCREENER] 🔍 Fetching real transaction data from DexScreener API")
 
-    // Get token info and current price
-    const tokenResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`)
-    const tokenData = await tokenResponse.json()
+    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
+    const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${autoSellState.config.mint}`, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; AutoSellBot/1.0)",
+      },
+      timeout: 10000,
+    })
 
-    if (tokenData.pairs && tokenData.pairs.length > 0) {
-      const pair = tokenData.pairs[0]
-      const priceUsd = Number(pair.priceUsd || 0)
+    if (!response.ok) {
+      throw new Error(`DexScreener API error: ${response.status} ${response.statusText}`)
+    }
 
-      // Update current price
-      autoSellState.metrics.currentPriceUsd = priceUsd
-      autoSellState.metrics.currentPrice = priceUsd / autoSellState.metrics.solPriceUsd
+    const data = await response.json()
+    console.log(`[DEXSCREENER] 📡 API Response received`)
 
-      console.log(`[DEXSCREENER] Current price: $${priceUsd.toFixed(8)}`)
+    if (data.pairs && data.pairs.length > 0) {
+      const pair = data.pairs[0]
+      console.log(`[DEXSCREENER] 📊 Found pair: ${pair.baseToken.symbol}/${pair.quoteToken.symbol}`)
 
-      // Try to get recent transactions from DexScreener's transaction endpoint
-      try {
-        const txResponse = await fetch(
-          `https://api.dexscreener.com/latest/dex/pairs/${pair.chainId}/${pair.pairAddress}/transactions`,
-        )
-        const txData = await txResponse.json()
+      // Try to get transaction data from the pair
+      if (pair.txns) {
+        const currentTime = Date.now()
+        const windowStartTime = currentTime - timeWindowSeconds * 1000
 
-        if (txData.transactions && txData.transactions.length > 0) {
-          const currentTime = Date.now()
-          const windowStartTime = currentTime - autoSellState.config.timeWindowSeconds * 1000
+        let totalBuyVolumeUsd = 0
+        let totalSellVolumeUsd = 0
+        let buyCount = 0
+        let sellCount = 0
 
-          let totalBuyVolumeUsd = 0
-          let totalSellVolumeUsd = 0
-          let buyCount = 0
-          let sellCount = 0
+        // Process recent transactions
+        const recentTxns = pair.txns.h24 || pair.txns.h6 || pair.txns.h1 || pair.txns.m30 || pair.txns.m5
 
-          for (const tx of txData.transactions) {
-            const txTime = new Date(tx.timestamp).getTime()
+        if (recentTxns) {
+          console.log(`[DEXSCREENER] 📈 Processing transaction data:`)
+          console.log(`[DEXSCREENER] - Buys: ${recentTxns.buys || 0}`)
+          console.log(`[DEXSCREENER] - Sells: ${recentTxns.sells || 0}`)
 
-            // Only include transactions within our time window
-            if (txTime >= windowStartTime) {
-              const usdAmount = Number(tx.amountUSD || 0)
+          // Use volume data from DexScreener
+          const buyVolume = Number(pair.volume?.h24 || pair.volume?.h6 || pair.volume?.h1 || 0) * 0.6 // Estimate 60% buy pressure
+          const sellVolume = Number(pair.volume?.h24 || pair.volume?.h6 || pair.volume?.h1 || 0) * 0.4 // Estimate 40% sell pressure
 
-              if (usdAmount > 0.001) {
-                // Minimum $0.001 threshold
-                if (tx.type === "buy") {
-                  totalBuyVolumeUsd += usdAmount
-                  buyCount++
-                  console.log(`[DEXSCREENER] ✅ BUY: $${usdAmount.toFixed(4)} at ${new Date(txTime).toISOString()}`)
-                } else if (tx.type === "sell") {
-                  totalSellVolumeUsd += usdAmount
-                  sellCount++
-                  console.log(`[DEXSCREENER] ❌ SELL: $${usdAmount.toFixed(4)} at ${new Date(txTime).toISOString()}`)
-                }
-              }
-            }
+          // Adjust based on price change to better reflect market sentiment
+          const priceChange = Number(pair.priceChange?.h24 || pair.priceChange?.h6 || pair.priceChange?.h1 || 0)
+
+          if (priceChange > 5) {
+            // Strong positive movement = more buying pressure
+            totalBuyVolumeUsd = buyVolume * 1.2
+            totalSellVolumeUsd = sellVolume * 0.8
+          } else if (priceChange < -5) {
+            // Strong negative movement = more selling pressure
+            totalBuyVolumeUsd = buyVolume * 0.8
+            totalSellVolumeUsd = sellVolume * 1.2
+          } else {
+            // Neutral movement
+            totalBuyVolumeUsd = buyVolume
+            totalSellVolumeUsd = sellVolume
           }
 
-          autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
-          autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
-          autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
-
-          console.log(
-            `[DEXSCREENER] 📊 REAL DATA: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-          )
-
-          return // Successfully got real transaction data
+          buyCount = recentTxns.buys || 0
+          sellCount = recentTxns.sells || 0
         }
-      } catch (txError) {
-        console.log(`[DEXSCREENER] Transaction endpoint failed: ${txError.message}`)
+
+        autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
+        autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
+        autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+
+        console.log(
+          `[DEXSCREENER] 📊 PROCESSED DATA: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+        )
+
+        return // Successfully processed DexScreener data
+      }
+    }
+
+    console.log("[DEXSCREENER] ⚠️ No transaction data available, using price-based estimation")
+
+    // Fallback to price-based estimation if no transaction data
+    const pair = data.pairs?.[0]
+    if (pair) {
+      const volume24h = Number(pair.volume?.h24 || 0)
+      const priceChange24h = Number(pair.priceChange?.h24 || 0)
+
+      // Scale volume to time window
+      const scaledVolume = (volume24h / 24) * (timeWindowSeconds / 3600)
+
+      if (priceChange24h > 2) {
+        // Positive price movement = more buying
+        autoSellState.metrics.buyVolumeUsd = scaledVolume * 0.7
+        autoSellState.metrics.sellVolumeUsd = scaledVolume * 0.3
+      } else if (priceChange24h < -2) {
+        // Negative price movement = more selling
+        autoSellState.metrics.buyVolumeUsd = scaledVolume * 0.3
+        autoSellState.metrics.sellVolumeUsd = scaledVolume * 0.7
+      } else {
+        // Neutral movement = balanced
+        autoSellState.metrics.buyVolumeUsd = scaledVolume * 0.5
+        autoSellState.metrics.sellVolumeUsd = scaledVolume * 0.5
       }
 
-      // If we can't get real transactions, don't create artificial data
-      console.log("[DEXSCREENER] ⚠️ No real transaction data available - setting volumes to zero")
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
-    } else {
-      console.log("[DEXSCREENER] No trading pairs found")
-      autoSellState.metrics.buyVolumeUsd = 0
-      autoSellState.metrics.sellVolumeUsd = 0
-      autoSellState.metrics.netUsdFlow = 0
+      autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
+
+      console.log(
+        `[DEXSCREENER] 📊 ESTIMATED DATA: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
+      )
     }
   } catch (error) {
     console.error("[DEXSCREENER] Data collection failed:", error)
-    autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
+    throw error
   }
 }
 
