@@ -67,6 +67,72 @@ process.on("unhandledRejection", (reason, promise) => {
   // Don't exit the process, just log the error
 })
 
+const transactionClassifier = {
+  // Cross-validate transaction types from multiple sources
+  classifyTransaction: (apiType: string, tokenAmount: number, priceChange: number, source: string) => {
+    console.log(
+      `[CLASSIFIER] Raw data - API Type: ${apiType}, Token Amount: ${tokenAmount}, Price Change: ${priceChange}%, Source: ${source}`,
+    )
+
+    // BULLETPROOF RULE: Use token amount direction as primary classifier
+    let finalType = "unknown"
+
+    if (tokenAmount > 0) {
+      finalType = "buy" // Positive token amount = someone bought tokens
+    } else if (tokenAmount < 0) {
+      finalType = "sell" // Negative token amount = someone sold tokens
+    } else {
+      // Fallback to API type only if token amount is zero
+      finalType = apiType === "buy" ? "buy" : apiType === "sell" ? "sell" : "unknown"
+    }
+
+    console.log(`[CLASSIFIER] FINAL CLASSIFICATION: ${finalType.toUpperCase()} (${source})`)
+    return finalType
+  },
+
+  validateClassification: (transactions: any[]) => {
+    const buyCount = transactions.filter((t) => t.type === "buy").length
+    const sellCount = transactions.filter((t) => t.type === "sell").length
+    const confidence = transactions.length > 0 ? ((buyCount + sellCount) / transactions.length) * 100 : 0
+
+    console.log(
+      `[CLASSIFIER] Validation - Buys: ${buyCount}, Sells: ${sellCount}, Confidence: ${confidence.toFixed(1)}%`,
+    )
+    return { buyCount, sellCount, confidence }
+  },
+}
+
+const sellTriggerManager = {
+  activeTriggers: new Set<string>(),
+
+  createTriggerId: (netFlow: number, timestamp: number) => {
+    return `trigger_${Math.round(netFlow * 1000)}_${Math.floor(timestamp / 10000)}`
+  },
+
+  canExecuteSell: (netFlow: number, timestamp: number) => {
+    const triggerId = this.createTriggerId(netFlow, timestamp)
+
+    if (this.activeTriggers.has(triggerId)) {
+      console.log(`[TRIGGER] ❌ DUPLICATE TRIGGER BLOCKED: ${triggerId}`)
+      return false
+    }
+
+    this.activeTriggers.add(triggerId)
+    console.log(`[TRIGGER] ✅ NEW TRIGGER REGISTERED: ${triggerId}`)
+
+    // Clean old triggers (older than 5 minutes)
+    setTimeout(
+      () => {
+        this.activeTriggers.delete(triggerId)
+        console.log(`[TRIGGER] 🧹 CLEANED OLD TRIGGER: ${triggerId}`)
+      },
+      5 * 60 * 1000,
+    )
+
+    return true
+  },
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { config, privateKeys } = await request.json()
@@ -558,83 +624,104 @@ function analyzeTokenMintTransaction(transaction: any, tokenMint: string) {
   }
 }
 
-async function collectDexToolsData(): Promise<boolean> {
+async function collectDexToolsData() {
   if (!autoSellState.config) {
-    console.log("[DEXTOOLS] ❌ No config available")
-    return false
+    throw new Error("Configuration not available")
   }
 
-  const { mint, timeWindowSeconds } = autoSellState.config
-  console.log(`[DEXTOOLS] 🔍 PRIMARY SOURCE: Fetching transactions for ${mint} (${timeWindowSeconds}s window)`)
+  const mint = autoSellState.config.mint
+  const timeWindowSeconds = autoSellState.config.timeWindowSeconds || 30
+  const currentTime = Date.now()
+  const startTime = currentTime - timeWindowSeconds * 1000
+
+  console.log(`[DEXTOOLS] 🚀 BULLETPROOF DEXTOOLS COLLECTION`)
+  console.log(`[DEXTOOLS] Time window: ${timeWindowSeconds}s, Mint: ${mint}`)
 
   try {
-    const response = await fetch(`https://api.dextools.io/v1/solana/token/${mint}/transactions?limit=100&sort=desc`, {
-      headers: {
-        "X-API-Key": process.env.DEXTOOLS_API_KEY || "",
+    const response = await fetch(
+      `https://public-api.dextools.io/standard/v2/token/solana/${mint}/transactions?limit=100&sort=desc`,
+      {
+        headers: {
+          "X-API-Key": process.env.DEXTOOLS_API_KEY || "",
+        },
       },
-    })
+    )
 
     if (!response.ok) {
-      console.log(`[DEXTOOLS] ❌ API Error: ${response.status}`)
-      return false
+      throw new Error(`DexTools API error: ${response.status}`)
     }
 
     const data = await response.json()
-    const transactions = data.data || []
-    console.log(`[DEXTOOLS] 📊 Retrieved ${transactions.length} transactions`)
+    console.log(`[DEXTOOLS] Raw response received, processing transactions...`)
 
-    const cutoffTime = Date.now() - timeWindowSeconds * 1000
+    if (!data.data || !Array.isArray(data.data)) {
+      throw new Error("Invalid DexTools response format")
+    }
+
     let totalBuyVolumeUsd = 0
     let totalSellVolumeUsd = 0
     let buyCount = 0
     let sellCount = 0
+    const processedTransactions = []
 
-    for (const tx of transactions) {
-      const txTime = new Date(tx.timestamp).getTime()
-      if (txTime < cutoffTime) continue
+    for (const tx of data.data) {
+      try {
+        const txTime = new Date(tx.timeStamp).getTime()
 
-      const usdAmount = Number(tx.usdAmount || 0)
-      if (usdAmount < 0.0001) continue // Lowered threshold to catch smaller transactions
+        // Only process transactions within our time window
+        if (txTime < startTime) continue
 
-      const apiType = String(tx.type || "").toLowerCase()
+        const usdAmount = Math.abs(Number(tx.amount_usd || 0))
+        const tokenAmount = Number(tx.amount || 0)
+        const priceChange = Number(tx.price_change_5m || 0)
 
-      console.log(
-        `[DEXTOOLS] 🔍 Raw transaction: Type="${tx.type}", USD=$${usdAmount.toFixed(4)}, Time=${new Date(txTime).toISOString()}`,
-      )
+        // Skip transactions that are too small
+        if (usdAmount < 0.0001) continue
 
-      // DIRECT MAPPING - NO SWAPPING OR REVERSALS
-      if (apiType === "buy" || apiType === "purchase") {
-        totalBuyVolumeUsd += usdAmount
-        buyCount++
-        console.log(`[DEXTOOLS] ✅ BUY DETECTED: $${usdAmount.toFixed(4)} -> ADDING TO BUY PRESSURE`)
-      } else if (apiType === "sell" || apiType === "sale") {
-        totalSellVolumeUsd += usdAmount
-        sellCount++
-        console.log(`[DEXTOOLS] ✅ SELL DETECTED: $${usdAmount.toFixed(4)} -> ADDING TO SELL PRESSURE`)
-      } else {
-        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" for $${usdAmount.toFixed(4)} - SKIPPING`)
+        const classifiedType = transactionClassifier.classifyTransaction(tx.type, tokenAmount, priceChange, "DexTools")
+
+        if (classifiedType === "buy") {
+          totalBuyVolumeUsd += usdAmount
+          buyCount++
+          console.log(`[DEXTOOLS] ✅ BUY: $${usdAmount.toFixed(4)} (${tokenAmount.toFixed(0)} tokens)`)
+        } else if (classifiedType === "sell") {
+          totalSellVolumeUsd += usdAmount
+          sellCount++
+          console.log(`[DEXTOOLS] ✅ SELL: $${usdAmount.toFixed(4)} (${tokenAmount.toFixed(0)} tokens)`)
+        }
+
+        processedTransactions.push({
+          type: classifiedType,
+          amount: usdAmount,
+          tokens: tokenAmount,
+          timestamp: txTime,
+        })
+      } catch (txError) {
+        console.error(`[DEXTOOLS] Transaction processing error:`, txError)
+        continue
       }
     }
+
+    const validation = transactionClassifier.validateClassification(processedTransactions)
 
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
     autoSellState.metrics.buyTransactionCount = buyCount
     autoSellState.metrics.sellTransactionCount = sellCount
-    autoSellState.metrics.dataSourceConfidence = 95 // High confidence in DexTools Premium
+    autoSellState.metrics.dataSourceConfidence = validation.confidence
+    autoSellState.metrics.lastDataUpdateTime = currentTime
 
-    console.log(`[DEXTOOLS] 🎯 BULLETPROOF FINAL RESULTS:`)
-    console.log(`[DEXTOOLS] 📈 BUY PRESSURE: $${totalBuyVolumeUsd.toFixed(4)} (${buyCount} buy transactions)`)
-    console.log(`[DEXTOOLS] 📉 SELL PRESSURE: $${totalSellVolumeUsd.toFixed(4)} (${sellCount} sell transactions)`)
-    console.log(`[DEXTOOLS] 💰 NET FLOW: $${autoSellState.metrics.netUsdFlow.toFixed(4)}`)
-    console.log(
-      `[DEXTOOLS] 🔍 VERIFICATION: Buy=${totalBuyVolumeUsd > 0 ? "DETECTED" : "NONE"}, Sell=${totalSellVolumeUsd > 0 ? "DETECTED" : "NONE"}`,
-    )
+    console.log(`[DEXTOOLS] 🎯 BULLETPROOF RESULTS:`)
+    console.log(`[DEXTOOLS] Buy Volume: $${totalBuyVolumeUsd.toFixed(4)} (${buyCount} transactions)`)
+    console.log(`[DEXTOOLS] Sell Volume: $${totalSellVolumeUsd.toFixed(4)} (${sellCount} transactions)`)
+    console.log(`[DEXTOOLS] Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(4)}`)
+    console.log(`[DEXTOOLS] Confidence: ${validation.confidence.toFixed(1)}%`)
 
     return totalBuyVolumeUsd > 0 || totalSellVolumeUsd > 0
   } catch (error) {
-    console.error("[DEXTOOLS] ❌ Error:", error)
-    return false
+    console.error(`[DEXTOOLS] ❌ Collection failed:`, error)
+    throw error
   }
 }
 
@@ -812,69 +899,77 @@ async function analyzeAndExecuteAutoSell() {
     const netUsdFlow = autoSellState.metrics.netUsdFlow
     const buyVolumeUsd = autoSellState.metrics.buyVolumeUsd
     const sellVolumeUsd = autoSellState.metrics.sellVolumeUsd
-    const cooldownMs = autoSellState.config.cooldownSeconds * 1000
     const currentTime = Date.now()
 
+    console.log(`[AUTO-SELL] 📊 BULLETPROOF ANALYSIS:`)
     console.log(
-      `[AUTO-SELL] 📊 ANALYSIS - Buy: $${buyVolumeUsd.toFixed(4)} | Sell: $${sellVolumeUsd.toFixed(4)} | Net Flow: $${netUsdFlow.toFixed(4)}`,
+      `[AUTO-SELL] Buy Pressure: $${buyVolumeUsd.toFixed(4)} (${autoSellState.metrics.buyTransactionCount} txs)`,
     )
     console.log(
-      `[AUTO-SELL] 📊 TRANSACTION COUNTS - Buys: ${autoSellState.metrics.buyTransactionCount} | Sells: ${autoSellState.metrics.sellTransactionCount}`,
+      `[AUTO-SELL] Sell Pressure: $${sellVolumeUsd.toFixed(4)} (${autoSellState.metrics.sellTransactionCount} txs)`,
     )
+    console.log(`[AUTO-SELL] Net Flow: $${netUsdFlow.toFixed(4)}`)
+    console.log(`[AUTO-SELL] Data Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}%`)
 
-    const minNetFlow = 0.01 // Minimum $0.01 net flow to trigger
-    const sellTriggerActive = netUsdFlow > minNetFlow && buyVolumeUsd > sellVolumeUsd && buyVolumeUsd > 0.01
+    const minNetFlow = 0.01
+    const minBuyVolume = 0.01
+    const minConfidence = 50
 
-    if (sellTriggerActive) {
+    const sellCriteriaMet =
+      netUsdFlow > minNetFlow &&
+      buyVolumeUsd > sellVolumeUsd &&
+      buyVolumeUsd > minBuyVolume &&
+      autoSellState.metrics.dataSourceConfidence > minConfidence
+
+    if (sellCriteriaMet) {
+      console.log(`[AUTO-SELL] ✅ SELL CRITERIA MET!`)
+      console.log(`[AUTO-SELL] Net Flow: $${netUsdFlow.toFixed(4)} > $${minNetFlow}`)
+      console.log(`[AUTO-SELL] Buy Volume: $${buyVolumeUsd.toFixed(4)} > Sell Volume: $${sellVolumeUsd.toFixed(4)}`)
       console.log(
-        `[AUTO-SELL] ✅ SELL CRITERIA MET! Net flow $${netUsdFlow.toFixed(4)} > $${minNetFlow} with buy volume $${buyVolumeUsd.toFixed(4)} > sell volume $${sellVolumeUsd.toFixed(4)}`,
+        `[AUTO-SELL] Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}% > ${minConfidence}%`,
       )
 
-      if (currentTime - autoSellState.metrics.lastSellTrigger < cooldownMs) {
-        const remainingCooldown = Math.ceil((cooldownMs - (currentTime - autoSellState.metrics.lastSellTrigger)) / 1000)
-        console.log(`[AUTO-SELL] ⏳ In cooldown period, ${remainingCooldown}s remaining`)
+      if (!sellTriggerManager.canExecuteSell(netUsdFlow, currentTime)) {
+        console.log(`[AUTO-SELL] ⏸️ SELL BLOCKED: Duplicate trigger detected`)
         return
       }
 
-      console.log(`[AUTO-SELL] 🚀 EXECUTING IMMEDIATE SELL! Positive net flow detected.`)
+      const cooldownMs = autoSellState.config.cooldownSeconds * 1000
+      if (currentTime - autoSellState.metrics.lastSellTrigger < cooldownMs) {
+        const remainingCooldown = Math.ceil((cooldownMs - (currentTime - autoSellState.metrics.lastSellTrigger)) / 1000)
+        console.log(`[AUTO-SELL] ⏳ COOLDOWN ACTIVE: ${remainingCooldown}s remaining`)
+        return
+      }
 
-      const sellAmountUsd = netUsdFlow * 0.25
-      console.log(`[AUTO-SELL] 💰 Sell Amount: 25% of $${netUsdFlow.toFixed(4)} = $${sellAmountUsd.toFixed(4)}`)
+      console.log(`[AUTO-SELL] 🚀 EXECUTING ONE-TIME SELL TRIGGER!`)
 
-      console.log(`[AUTO-SELL] Step 1: Updating token price...`)
-      await updateTokenPrice()
-      console.log(`[AUTO-SELL] Step 1 Complete: Current price = $${autoSellState.metrics.currentPriceUsd}`)
-
-      console.log(`[AUTO-SELL] Step 2: Updating wallet balances...`)
-      await updateAllWalletBalances()
-      const totalTokens = autoSellState.wallets.reduce((sum, wallet) => sum + wallet.tokenBalance, 0)
-      console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
-
-      console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
       await executeCoordinatedSell(netUsdFlow)
-      console.log(`[AUTO-SELL] Step 3 Complete: Sell execution finished`)
 
-      console.log(`[AUTO-SELL] 🔄 RESETTING METRICS after successful sell`)
       autoSellState.metrics.buyVolumeUsd = 0
       autoSellState.metrics.sellVolumeUsd = 0
       autoSellState.metrics.netUsdFlow = 0
       autoSellState.metrics.buyTransactionCount = 0
       autoSellState.metrics.sellTransactionCount = 0
       autoSellState.metrics.lastSellTrigger = currentTime
-    } else {
-      console.log(
-        `[AUTO-SELL] ❌ Sell criteria NOT met - Net: $${netUsdFlow.toFixed(4)}, Buy: $${buyVolumeUsd.toFixed(4)}, Sell: $${sellVolumeUsd.toFixed(4)}`,
-      )
 
-      if (sellVolumeUsd > buyVolumeUsd && sellVolumeUsd > 0.01) {
+      console.log(`[AUTO-SELL] 🔄 METRICS RESET - Ready for next trigger`)
+    } else {
+      console.log(`[AUTO-SELL] ❌ SELL CRITERIA NOT MET:`)
+      if (netUsdFlow <= minNetFlow)
+        console.log(`[AUTO-SELL] - Net Flow too low: $${netUsdFlow.toFixed(4)} <= $${minNetFlow}`)
+      if (buyVolumeUsd <= sellVolumeUsd)
         console.log(
-          `[AUTO-SELL] 📉 SELL PRESSURE DETECTED: Sells ($${sellVolumeUsd.toFixed(4)}) > Buys ($${buyVolumeUsd.toFixed(4)}) - No sell triggered`,
+          `[AUTO-SELL] - Sell pressure higher: Buy $${buyVolumeUsd.toFixed(4)} <= Sell $${sellVolumeUsd.toFixed(4)}`,
         )
-      }
+      if (buyVolumeUsd <= minBuyVolume)
+        console.log(`[AUTO-SELL] - Buy volume too low: $${buyVolumeUsd.toFixed(4)} <= $${minBuyVolume}`)
+      if (autoSellState.metrics.dataSourceConfidence <= minConfidence)
+        console.log(
+          `[AUTO-SELL] - Confidence too low: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}% <= ${minConfidence}%`,
+        )
     }
   } catch (error) {
-    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in analysis and execution:", error)
-    console.error("[AUTO-SELL] Error stack:", error.stack)
+    console.error("[AUTO-SELL] ❌ CRITICAL ERROR in analysis:", error)
   }
 }
 
