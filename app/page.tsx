@@ -24,6 +24,7 @@ import {
   BarChart3,
   ExternalLink,
 } from "lucide-react"
+import { subscribeMint } from "@/utils/mintSubscription" // Declare the subscribeMint variable
 
 type Trade = {
   sig: string
@@ -107,6 +108,14 @@ function sanitizeMintInput(input: string): string {
     }
   } catch {}
   return s.replace(/[^1-9A-HJ-NP-Za-km-z]/g, "")
+}
+
+async function fetchJson(input: RequestInfo, init?: RequestInit) {
+  const res = await fetch(input, init)
+  const text = await res.text()
+  const isJson = res.headers.get("content-type")?.includes("application/json")
+  if (!res.ok) throw new Error(`${res.status} ${text.slice(0, 300)}`)
+  return isJson ? JSON.parse(text) : null
 }
 
 export default function AutoSellDashboard() {
@@ -261,19 +270,17 @@ export default function AutoSellDashboard() {
   useEffect(() => {
     if (!mint) return
 
-    const subscribeMint = async () => {
+    const subscribeMintFunction = async () => {
       try {
-        await fetch("/api/mints/subscribe", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ mint }),
-        })
+        const result = await subscribeMint(mint)
+        console.log("Mint subscription result:", result)
       } catch (error) {
         console.error("Failed to subscribe to mint:", error)
+        setLog(`⚠️ Failed to subscribe mint to monitoring: ${error}`)
       }
     }
 
-    subscribeMint()
+    subscribeMintFunction()
   }, [mint])
 
   useEffect(() => {
@@ -298,16 +305,13 @@ export default function AutoSellDashboard() {
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
-        const res = await fetch("/api/auto-sell/status")
-        if (res.ok) {
-          const data = await res.json()
-          setStatus((prev) => ({
-            ...prev,
-            isRunning: data.isRunning,
-            config: data.config,
-            walletStatus: data.walletStatus,
-          }))
-        }
+        const data = await fetchJson("/api/auto-sell/status")
+        setStatus((prev) => ({
+          ...prev,
+          isRunning: data.isRunning,
+          config: data.config,
+          walletStatus: data.walletStatus,
+        }))
       } catch (error) {
         console.error("Failed to fetch status:", error)
       }
@@ -419,7 +423,7 @@ export default function AutoSellDashboard() {
     try {
       const keys = connected.filter((w) => selected[w.pubkey] && w.hasSecret).map((w) => w.sk!)
 
-      const res = await fetch("/api/auto-sell/start", {
+      const result = await fetchJson("/api/auto-sell/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -428,12 +432,8 @@ export default function AutoSellDashboard() {
         }),
       })
 
-      const result = await res.json()
       setLog(JSON.stringify(result, null, 2))
-
-      if (res.ok) {
-        setLog(`✅ Real-time market momentum auto-sell engine started successfully!`)
-      }
+      setLog(`✅ Real-time market momentum auto-sell engine started successfully!`)
     } catch (e: any) {
       setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
@@ -446,16 +446,12 @@ export default function AutoSellDashboard() {
     setLog(`⏹️ Stopping auto-sell engine...`)
 
     try {
-      const res = await fetch("/api/auto-sell/stop", {
+      const result = await fetchJson("/api/auto-sell/stop", {
         method: "POST",
       })
 
-      const result = await res.json()
       setLog(JSON.stringify(result, null, 2))
-
-      if (res.ok) {
-        setLog(`✅ Auto-sell engine stopped successfully!`)
-      }
+      setLog(`✅ Auto-sell engine stopped successfully!`)
     } catch (e: any) {
       setLog(`❌ Error: ${e?.message || String(e)}`)
     } finally {
