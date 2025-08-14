@@ -552,167 +552,75 @@ function analyzeTokenMintTransaction(transaction: any, tokenMint: string) {
   }
 }
 
-async function collectDexToolsData() {
+async function collectDexToolsData(): Promise<boolean> {
   if (!autoSellState.config) {
-    console.log("[DEXTOOLS] ❌ Config not available")
-    return
+    console.log("[DEXTOOLS] ❌ No config available")
+    return false
   }
 
-  const maxRetries = 3
-  let lastError = null
+  const { mint, timeWindowSeconds } = autoSellState.config
+  console.log(`[DEXTOOLS] 🔍 PRIMARY SOURCE: Fetching transactions for ${mint} (${timeWindowSeconds}s window)`)
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const { mint, timeWindowSeconds } = autoSellState.config
-      const windowStartTime = Date.now() - timeWindowSeconds * 1000
+  try {
+    const response = await fetch(`https://api.dextools.io/v1/solana/token/${mint}/transactions?limit=100&sort=desc`, {
+      headers: {
+        "X-API-Key": process.env.DEXTOOLS_API_KEY || "",
+      },
+    })
 
-      console.log(`[DEXTOOLS] 🚀 PREMIUM PRIMARY SOURCE - Attempt ${attempt}/${maxRetries}`)
-      console.log(
-        `[DEXTOOLS] 📅 Time window: ${new Date(windowStartTime).toLocaleTimeString()} → ${new Date().toLocaleTimeString()}`,
-      )
+    if (!response.ok) {
+      console.log(`[DEXTOOLS] ❌ API Error: ${response.status}`)
+      return false
+    }
 
-      const response = await fetch(`https://api.dextools.io/v2/token/solana/${mint}/transactions?limit=100&sort=desc`, {
-        headers: {
-          "X-API-Key": process.env.DEXTOOLS_API_KEY || "",
-          Accept: "application/json",
-        },
-        signal: AbortSignal.timeout(15000),
-      })
+    const data = await response.json()
+    const transactions = data.data || []
+    console.log(`[DEXTOOLS] 📊 Retrieved ${transactions.length} transactions`)
 
-      if (!response.ok) {
-        throw new Error(`DexTools API error: ${response.status} ${response.statusText}`)
-      }
+    const cutoffTime = Date.now() - timeWindowSeconds * 1000
+    let totalBuyVolumeUsd = 0
+    let totalSellVolumeUsd = 0
+    let buyCount = 0
+    let sellCount = 0
 
-      const data = await response.json()
-      console.log(`[DEXTOOLS] 📊 Raw API response structure:`, {
-        hasData: !!data.data,
-        dataLength: data.data?.length || 0,
-        statusCode: data.statusCode,
-        message: data.message,
-      })
+    for (const tx of transactions) {
+      const txTime = new Date(tx.timestamp).getTime()
+      if (txTime < cutoffTime) continue
 
-      if (!data.data || !Array.isArray(data.data)) {
-        throw new Error("No transaction data in DexTools response")
-      }
+      const usdAmount = Number(tx.usdAmount || 0)
+      if (usdAmount < 0.001) continue // Skip very small transactions
 
-      let totalBuyVolumeUsd = 0
-      let totalSellVolumeUsd = 0
-      let buyCount = 0
-      let sellCount = 0
-      let processedCount = 0
+      // BULLETPROOF CLASSIFICATION: Use API type directly, NO REVERSALS
+      const apiType = String(tx.type || "").toLowerCase()
 
-      console.log(`[DEXTOOLS] 🔍 Processing ${data.data.length} transactions...`)
-
-      for (const tx of data.data) {
-        try {
-          const txTime = new Date(tx.timeStamp || tx.timestamp || tx.blockTime).getTime()
-
-          if (txTime >= windowStartTime - 10000) {
-            // 10 second buffer
-            const usdAmount = Number(tx.amountUSD || tx.amount_usd || tx.valueUsd || 0)
-            processedCount++
-
-            console.log(`[DEXTOOLS] 🔍 TRANSACTION ${processedCount}:`)
-            console.log(`[DEXTOOLS] - Raw Type: "${tx.type || tx.side || tx.action}"`)
-            console.log(`[DEXTOOLS] - Amount USD: $${usdAmount.toFixed(6)}`)
-            console.log(`[DEXTOOLS] - Token Amount: ${tx.tokenAmount || "N/A"}`)
-            console.log(`[DEXTOOLS] - Time: ${new Date(txTime).toLocaleTimeString()}`)
-            console.log(`[DEXTOOLS] - Age: ${((Date.now() - txTime) / 1000).toFixed(1)}s ago`)
-
-            if (usdAmount >= 0.0001) {
-              const rawType = (tx.type || tx.side || tx.action || "").toLowerCase()
-              let finalType = null
-
-              // Method 1: Direct type from API
-              if (rawType === "buy" || rawType === "purchase") {
-                finalType = "buy"
-              } else if (rawType === "sell" || rawType === "sale") {
-                finalType = "sell"
-              }
-
-              // Method 2: Token amount analysis (positive = received tokens = buy, negative = sent tokens = sell)
-              if (!finalType && tx.tokenAmount) {
-                const tokenAmount = Number(tx.tokenAmount)
-                if (tokenAmount > 0) {
-                  finalType = "buy"
-                  console.log(`[DEXTOOLS] 🔍 INFERRED FROM TOKEN AMOUNT: +${tokenAmount} = BUY`)
-                } else if (tokenAmount < 0) {
-                  finalType = "sell"
-                  console.log(`[DEXTOOLS] 🔍 INFERRED FROM TOKEN AMOUNT: ${tokenAmount} = SELL`)
-                }
-              }
-
-              // Method 3: Price impact analysis (if available)
-              if (!finalType && tx.priceImpact) {
-                const priceImpact = Number(tx.priceImpact)
-                if (priceImpact > 0) {
-                  finalType = "buy" // Positive price impact = buying pressure
-                } else if (priceImpact < 0) {
-                  finalType = "sell" // Negative price impact = selling pressure
-                }
-              }
-
-              console.log(`[DEXTOOLS] 🎯 FINAL TYPE DETERMINATION: "${rawType}" → "${finalType}"`)
-
-              if (finalType === "buy") {
-                totalBuyVolumeUsd += usdAmount
-                buyCount++
-                console.log(`[DEXTOOLS] ✅ CONFIRMED BUY: $${usdAmount.toFixed(6)} → BUY PRESSURE`)
-              } else if (finalType === "sell") {
-                totalSellVolumeUsd += usdAmount
-                sellCount++
-                console.log(`[DEXTOOLS] ❌ CONFIRMED SELL: $${usdAmount.toFixed(6)} → SELL PRESSURE`)
-              } else {
-                console.log(`[DEXTOOLS] ❓ UNKNOWN TYPE: "${rawType}" - $${usdAmount.toFixed(6)} - SKIPPED`)
-              }
-            } else {
-              console.log(`[DEXTOOLS] ⚠️ Skipped (amount too small): $${usdAmount.toFixed(8)}`)
-            }
-          }
-        } catch (txError) {
-          console.log(`[DEXTOOLS] ⚠️ Error processing transaction:`, txError.message)
-        }
-      }
-
-      console.log(`[DEXTOOLS] 📈 FINAL RESULTS (Attempt ${attempt}):`)
-      console.log(`[DEXTOOLS] - Processed: ${processedCount}/${data.data.length} transactions`)
-      console.log(`[DEXTOOLS] - Buy Transactions: ${buyCount} totaling $${totalBuyVolumeUsd.toFixed(6)}`)
-      console.log(`[DEXTOOLS] - Sell Transactions: ${sellCount} totaling $${totalSellVolumeUsd.toFixed(6)}`)
-      console.log(`[DEXTOOLS] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(6)}`)
-
-      console.log(`[DEXTOOLS] 🔄 ASSIGNING TO METRICS:`)
-      console.log(`[DEXTOOLS] - buyVolumeUsd = $${totalBuyVolumeUsd.toFixed(6)} (from ${buyCount} buy transactions)`)
-      console.log(
-        `[DEXTOOLS] - sellVolumeUsd = $${totalSellVolumeUsd.toFixed(6)} (from ${sellCount} sell transactions)`,
-      )
-
-      autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
-      autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
-      autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
-      autoSellState.metrics.buyTransactionCount = buyCount
-      autoSellState.metrics.sellTransactionCount = sellCount
-      autoSellState.metrics.dataSourceConfidence = Math.min(100, (processedCount / Math.max(1, data.data.length)) * 100)
-
-      console.log(`[DEXTOOLS] ✅ SUCCESS - Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}%`)
-      console.log(`[DEXTOOLS] 🎯 FINAL METRICS CHECK:`)
-      console.log(`[DEXTOOLS] - Buy Volume: $${autoSellState.metrics.buyVolumeUsd.toFixed(6)}`)
-      console.log(`[DEXTOOLS] - Sell Volume: $${autoSellState.metrics.sellVolumeUsd.toFixed(6)}`)
-      console.log(`[DEXTOOLS] - Net Flow: $${autoSellState.metrics.netUsdFlow.toFixed(6)}`)
-
-      return // Success, exit retry loop
-    } catch (error) {
-      lastError = error
-      console.error(`[DEXTOOLS] ❌ Attempt ${attempt}/${maxRetries} failed:`, error.message)
-
-      if (attempt < maxRetries) {
-        const delay = Math.pow(2, attempt) * 1000 // Exponential backoff
-        console.log(`[DEXTOOLS] ⏳ Retrying in ${delay}ms...`)
-        await new Promise((resolve) => setTimeout(resolve, delay))
+      if (apiType === "buy" || apiType === "purchase") {
+        totalBuyVolumeUsd += usdAmount
+        buyCount++
+        console.log(`[DEXTOOLS] ✅ BUY: $${usdAmount.toFixed(4)} (API type: "${tx.type}")`)
+      } else if (apiType === "sell" || apiType === "sale") {
+        totalSellVolumeUsd += usdAmount
+        sellCount++
+        console.log(`[DEXTOOLS] ✅ SELL: $${usdAmount.toFixed(4)} (API type: "${tx.type}")`)
+      } else {
+        console.log(`[DEXTOOLS] ⚠️ UNKNOWN TYPE: "${tx.type}" for $${usdAmount.toFixed(4)}`)
       }
     }
-  }
 
-  throw lastError || new Error("All DexTools attempts failed")
+    // DIRECT ASSIGNMENT - NO SWAPPING
+    autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
+    autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
+    autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+
+    console.log(`[DEXTOOLS] 🎯 FINAL RESULTS:`)
+    console.log(`[DEXTOOLS] 📈 BUY VOLUME: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} transactions)`)
+    console.log(`[DEXTOOLS] 📉 SELL VOLUME: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} transactions)`)
+    console.log(`[DEXTOOLS] 💰 NET FLOW: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`)
+
+    return totalBuyVolumeUsd > 0 || totalSellVolumeUsd > 0
+  } catch (error) {
+    console.error("[DEXTOOLS] ❌ Error:", error)
+    return false
+  }
 }
 
 async function collectAlchemyData() {
@@ -815,7 +723,7 @@ async function collectMarketDataForConfigurableWindow() {
 
     console.log(`[AUTO-SELL] 🎯 PRIORITY 1: DexTools Premium API...`)
     try {
-      await collectDexToolsData()
+      const dextoolsSuccess = await collectDexToolsData()
       console.log("[DEXTOOLS] ✅ PRIMARY SUCCESS - Premium DexTools data collected")
 
       if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
@@ -869,7 +777,7 @@ async function collectMarketDataForConfigurableWindow() {
 
     console.log(`[AUTO-SELL] 🎯 FINAL FALLBACK: DexScreener API...`)
     try {
-      await collectDexScreenerData()
+      const dexScreenerSuccess = await collectDexScreenerData()
       console.log("[DEXSCREENER] ✅ FALLBACK SUCCESS - DexScreener data collected")
       return { success: true, source: "DexScreener Fallback" }
     } catch (error) {
@@ -1312,136 +1220,71 @@ async function updateSolPrice() {
   }
 }
 
-async function collectDexScreenerData() {
+async function collectDexScreenerData(): Promise<boolean> {
   if (!autoSellState.config) {
-    console.log(`[DEXSCREENER] ❌ No config available`)
-    return { success: false, error: "No config" }
+    console.log("[DEXSCREENER] ❌ No config available")
+    return false
   }
 
   const { mint, timeWindowSeconds } = autoSellState.config
+  console.log(`[DEXSCREENER] 🔍 FALLBACK SOURCE: Fetching data for ${mint}`)
 
   try {
-    console.log(`[DEXSCREENER] 🔍 Fetching data for mint: ${mint}`)
-
-    const response = await safeFetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, {
-      timeout: 15000,
-    })
-
-    if (!response?.ok) {
-      throw new Error(`HTTP ${response?.status}`)
-    }
+    const response = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)
+    if (!response.ok) return false
 
     const data = await response.json()
     const pairs = data.pairs || []
+    if (pairs.length === 0) return false
 
-    if (pairs.length === 0) {
-      throw new Error("No trading pairs found")
-    }
+    const pair = pairs[0]
+    const cutoffTime = Date.now() - timeWindowSeconds * 1000
 
-    // Find the most liquid pair
-    const pair = pairs.reduce((best: any, current: any) => {
-      const bestLiquidity = Number(best.liquidity?.usd || 0)
-      const currentLiquidity = Number(current.liquidity?.usd || 0)
-      return currentLiquidity > bestLiquidity ? current : best
-    })
+    // Get recent transactions
+    const txResponse = await fetch(
+      `https://api.dexscreener.com/latest/dex/pairs/solana/${pair.pairAddress}/transactions`,
+    )
+    if (!txResponse.ok) return false
 
-    console.log(`[DEXSCREENER] 📊 Using pair: ${pair.pairAddress} (${pair.dexId})`)
+    const txData = await txResponse.json()
+    const transactions = txData.transactions || []
 
     let totalBuyVolumeUsd = 0
     let totalSellVolumeUsd = 0
-    let buyCount = 0
-    let sellCount = 0
 
-    // Try to get recent transactions
-    try {
-      const txResponse = await safeFetch(
-        `https://api.dexscreener.com/latest/dex/pairs/${pair.chainId}/${pair.pairAddress}/txns`,
-        {
-          timeout: 10000,
-        },
-      )
+    for (const tx of transactions) {
+      const txTime = new Date(tx.timestamp).getTime()
+      if (txTime < cutoffTime) continue
 
-      if (txResponse?.ok) {
-        const txData = await txResponse.json()
-        const windowStartTime = Date.now() - timeWindowSeconds * 1000
+      const usdAmount = Number(tx.usdAmount || 0)
+      if (usdAmount < 0.001) continue
 
-        console.log(`[DEXSCREENER] 📊 Processing ${txData.data?.length || 0} transactions`)
-        console.log(
-          `[DEXSCREENER] 🕐 Time window: ${new Date(windowStartTime).toLocaleTimeString()} to ${new Date().toLocaleTimeString()}`,
-        )
+      // DEXSCREENER SPECIFIC: Apply type reversal because their API is backwards
+      const actualType = tx.type === "buy" ? "sell" : tx.type === "sell" ? "buy" : tx.type
 
-        for (const tx of txData.data || []) {
-          const txTime = new Date(tx.timeStamp).getTime()
-
-          // Only include transactions within our time window
-          if (txTime >= windowStartTime) {
-            const usdAmount = Number(tx.amountUSD || 0)
-
-            console.log(`[DEXSCREENER] 🔍 RAW TRANSACTION:`)
-            console.log(`[DEXSCREENER] - Type: "${tx.type}"`)
-            console.log(`[DEXSCREENER] - Amount USD: $${usdAmount.toFixed(4)}`)
-            console.log(`[DEXSCREENER] - Time: ${new Date(txTime).toLocaleTimeString()}`)
-            console.log(`[DEXSCREENER] - Raw data:`, JSON.stringify(tx, null, 2))
-
-            if (usdAmount > 0.001) {
-              const actualType = tx.type === "buy" ? "sell" : tx.type === "sell" ? "buy" : tx.type
-
-              // Log the reversal for debugging
-              if (tx.type !== actualType) {
-                console.log(
-                  `[DEXSCREENER] 🔄 REVERSED TYPE: API says "${tx.type}" → Using "${actualType}" for $${usdAmount.toFixed(4)}`,
-                )
-              }
-
-              if (actualType === "buy") {
-                totalBuyVolumeUsd += usdAmount
-                buyCount++
-                console.log(
-                  `[DEXSCREENER] ✅ CLASSIFIED AS BUY: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`,
-                )
-              } else if (actualType === "sell") {
-                totalSellVolumeUsd += usdAmount
-                sellCount++
-                console.log(
-                  `[DEXSCREENER] ❌ CLASSIFIED AS SELL: $${usdAmount.toFixed(4)} (${new Date(txTime).toLocaleTimeString()})`,
-                )
-              } else {
-                console.log(`[DEXSCREENER] ❓ UNKNOWN TYPE: "${actualType}" - $${usdAmount.toFixed(4)}`)
-              }
-            }
-          } else {
-            console.log(`[DEXSCREENER] ⏰ Transaction outside time window: ${new Date(txTime).toLocaleTimeString()}`)
-          }
-        }
+      if (actualType === "buy") {
+        totalBuyVolumeUsd += usdAmount
+        console.log(`[DEXSCREENER] ✅ BUY: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "buy")`)
+      } else if (actualType === "sell") {
+        totalSellVolumeUsd += usdAmount
+        console.log(`[DEXSCREENER] ✅ SELL: $${usdAmount.toFixed(4)} (API said "${tx.type}", using "sell")`)
       }
-    } catch (txError) {
-      console.log(`[DEXSCREENER] ⚠️ Transaction data unavailable: ${txError.message}`)
     }
 
-    // If no real transaction data, don't create artificial volumes
-
+    // DIRECT ASSIGNMENT
     autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
     autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
     autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
 
-    console.log(`[DEXSCREENER] 🎯 FINAL ASSIGNMENT:`)
-    console.log(`[DEXSCREENER] - autoSellState.metrics.buyVolumeUsd = $${totalBuyVolumeUsd.toFixed(4)}`)
-    console.log(`[DEXSCREENER] - autoSellState.metrics.sellVolumeUsd = $${totalSellVolumeUsd.toFixed(4)}`)
-    console.log(`[DEXSCREENER] - autoSellState.metrics.netUsdFlow = $${autoSellState.metrics.netUsdFlow.toFixed(4)}`)
-    console.log(
-      `[DEXSCREENER] 📊 SUMMARY: Buy: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} txs) | Sell: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} txs) | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-    )
+    console.log(`[DEXSCREENER] 🎯 FINAL RESULTS:`)
+    console.log(`[DEXSCREENER] 📈 BUY VOLUME: $${totalBuyVolumeUsd.toFixed(2)}`)
+    console.log(`[DEXSCREENER] 📉 SELL VOLUME: $${totalSellVolumeUsd.toFixed(2)}`)
+    console.log(`[DEXSCREENER] 💰 NET FLOW: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`)
 
-    return {
-      success: true,
-      buyVolumeUsd: totalBuyVolumeUsd,
-      sellVolumeUsd: totalSellVolumeUsd,
-      netUsdFlow: autoSellState.metrics.netUsdFlow,
-      transactionCount: buyCount + sellCount,
-    }
+    return totalBuyVolumeUsd > 0 || totalSellVolumeUsd > 0
   } catch (error) {
-    console.error(`[DEXSCREENER] ❌ Data collection failed:`, error)
-    return { success: false, error: error.message }
+    console.error("[DEXSCREENER] ❌ Error:", error)
+    return false
   }
 }
 
