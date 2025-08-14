@@ -238,7 +238,7 @@ export default function AutoSellDashboard() {
 
           if (retryCount < maxRetries) {
             retryCount++
-            const delay = 2000
+            const delay = 1000 + retryCount * 1000 // exponential backoff
             console.log(`Retrying EventSource connection in ${delay}ms...`)
             setTimeout(connectEventSource, delay)
           } else {
@@ -259,11 +259,13 @@ export default function AutoSellDashboard() {
       }
     }
 
-    setTimeout(connectEventSource, 500)
+    connectEventSource()
 
     return () => {
-      console.log("Cleaning up EventSource connection")
-      eventSource?.close()
+      if (eventSource) {
+        eventSource.close()
+        eventSource = null
+      }
     }
   }, [mint])
 
@@ -313,7 +315,9 @@ export default function AutoSellDashboard() {
           walletStatus: data.walletStatus,
         }))
       } catch (error) {
-        console.error("Failed to fetch status:", error)
+        if (!error?.message?.includes("ECONNRESET") && !error?.message?.includes("AbortError")) {
+          console.error("Failed to fetch status:", error)
+        }
       }
     }, 2000)
 

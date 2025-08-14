@@ -3,6 +3,13 @@ export const runtime = "edge"
 import { type NextRequest, NextResponse } from "next/server"
 import { getRedis } from "@/lib/redis"
 
+const handleConnectionError = (err: any) => {
+  if (err?.code === "ECONNRESET" || err?.name === "AbortError") {
+    return true // ignore these errors
+  }
+  return false
+}
+
 const FEED = (m: string) => `trades:${m}`
 const MAX_ITEMS = 2000
 
@@ -29,10 +36,15 @@ type Trade = {
 
 async function getUsdPriceForMint(mint: string): Promise<number> {
   try {
-    const r = await fetch(`https://price.jup.ag/v6/price?ids=${mint}`, { cache: "no-store" })
+    const r = await fetch(`https://price.jup.ag/v6/price?ids=${mint}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000), // 5 second timeout
+    })
     const j = (await r.json()) as any
     return Number(j?.data?.[mint]?.price ?? 0)
-  } catch {
+  } catch (err: any) {
+    if (handleConnectionError(err)) return 0
+    console.error("Price fetch error:", err)
     return 0
   }
 }
@@ -68,17 +80,41 @@ async function updateAutoSellState(tradeData: Trade, mintAddress: string) {
 }
 
 export async function POST(req: NextRequest) {
-  if (req.headers.get("x-webhook-secret") !== process.env.HELIUS_WEBHOOK_SECRET) {
-    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  try {
+    // @ts-ignore
+    req.on?.("aborted", () => {
+      /* ignore */
+    })
+
+    if (req.headers.get("x-webhook-secret") !== process.env.HELIUS_WEBHOOK_SECRET) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+    }
+
+    const body = await req.json().catch(() => null)
+    const rows: HeliusTx[] = Array.isArray(body) ? body : body?.events || body?.data || []
+    if (!Array.isArray(rows)) return NextResponse.json({ ok: true, received: 0 })
+
+    const redis = getRedis()
+    const perMint: Record<string, Trade[]> = {}
+
+    processWebhookData(rows, redis, perMint).catch((err) => {
+      if (!handleConnectionError(err)) {
+        console.error("Webhook processing error:", err)
+      }
+    })
+
+    // Return quickly to prevent timeouts
+    return NextResponse.json({ ok: true })
+  } catch (err: any) {
+    if (handleConnectionError(err)) {
+      return NextResponse.json({ ok: true })
+    }
+    console.error("Webhook error:", err)
+    return NextResponse.json({ ok: false }, { status: 500 })
   }
+}
 
-  const body = await req.json().catch(() => null)
-  const rows: HeliusTx[] = Array.isArray(body) ? body : body?.events || body?.data || []
-  if (!Array.isArray(rows)) return NextResponse.json({ ok: true, received: 0 })
-
-  const redis = getRedis()
-  const perMint: Record<string, Trade[]> = {}
-
+async function processWebhookData(rows: HeliusTx[], redis: any, perMint: Record<string, Trade[]>) {
   for (const tx of rows) {
     const arr = tx.tokenTransfers?.filter((t) => t.tokenAmount !== 0) ?? []
     if (!arr.length) continue
@@ -119,15 +155,18 @@ export async function POST(req: NextRequest) {
   }
 
   if (redis) {
-    for (const [mintAddr, tradesList] of Object.entries(perMint)) {
-      const key = FEED(mintAddr)
-      await redis.lpush(key, ...tradesList.map((tradeItem) => JSON.stringify(tradeItem)))
-      await redis.ltrim(key, 0, MAX_ITEMS - 1)
+    try {
+      for (const [mintAddr, tradesList] of Object.entries(perMint)) {
+        const key = FEED(mintAddr)
+        await redis.lpush(key, ...tradesList.map((tradeItem) => JSON.stringify(tradeItem)))
+        await redis.ltrim(key, 0, MAX_ITEMS - 1)
+      }
+    } catch (err: any) {
+      if (!handleConnectionError(err)) {
+        console.error("Redis error:", err)
+      }
     }
   }
-
-  const total = Object.values(perMint).reduce((sum, tradesArray) => sum + tradesArray.length, 0)
-  return NextResponse.json({ ok: true, parsed: total, mints: Object.keys(perMint).length })
 }
 
 async function executeAutoSell(sellAmountUsd: number) {
