@@ -1126,27 +1126,66 @@ async function collectBitqueryEAPData() {
       `[BITQUERY-EAP] Window: ${new Date(windowStartTime).toISOString()} to ${new Date(currentTime).toISOString()}`,
     )
 
-    // Call our EAP API endpoint
-    const response = await fetch(`/api/eap?mints=${mint}&seconds=${timeWindowSeconds}`)
+    // Call our EAP API endpoint with retry logic
+    let response
+    let retryCount = 0
+    const maxRetries = 3
+
+    while (retryCount < maxRetries) {
+      try {
+        response = await fetch(`/api/eap?mints=${mint}&seconds=${timeWindowSeconds}`, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        })
+
+        if (response.ok) break
+
+        retryCount++
+        if (retryCount < maxRetries) {
+          console.log(`[BITQUERY-EAP] Retry ${retryCount}/${maxRetries} after ${response.status} error`)
+          await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
+        }
+      } catch (error) {
+        retryCount++
+        if (retryCount >= maxRetries) throw error
+        console.log(`[BITQUERY-EAP] Retry ${retryCount}/${maxRetries} after network error`)
+        await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
+      }
+    }
 
     if (!response.ok) {
       throw new Error(`Bitquery EAP API error: ${response.status}`)
     }
 
     const data = await response.json()
+    console.log(`[BITQUERY-EAP] Raw API response:`, JSON.stringify(data, null, 2))
 
     if (data.ok) {
-      const buyVolumeUsd = Number(data.sellers_usd || 0)
-      const sellVolumeUsd = Number(data.buyers_usd || 0)
-      const netUsdFlow = buyVolumeUsd - sellVolumeUsd // Recalculate with corrected values
+      const buyVolumeUsd = Number(data.buyers_usd || 0) // Correct: buyers_usd for buy volume
+      const sellVolumeUsd = Number(data.sellers_usd || 0) // Correct: sellers_usd for sell volume
+      const netUsdFlow = buyVolumeUsd - sellVolumeUsd
 
       autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
       autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
       autoSellState.metrics.netUsdFlow = netUsdFlow
 
       console.log(
-        `[BITQUERY-EAP] ✅ REAL-TIME DATA: Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)} | Trades: ${Number(data.trades_count || 0)}`,
+        `[BITQUERY-EAP] ✅ CORRECTED DATA: Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)} | Trades: ${Number(data.trades_count || 0)}`,
       )
+
+      if (data.trades_count > 0) {
+        console.log(`[BITQUERY-EAP] 📊 TRANSACTION BREAKDOWN:`)
+        console.log(`  - Total Trades: ${data.trades_count}`)
+        console.log(`  - Buy Transactions: $${buyVolumeUsd.toFixed(2)} USD`)
+        console.log(`  - Sell Transactions: $${sellVolumeUsd.toFixed(2)} USD`)
+        console.log(
+          `  - Net Flow: $${netUsdFlow.toFixed(2)} USD (${netUsdFlow > 0 ? "POSITIVE - More Buying" : "NEGATIVE - More Selling"})`,
+        )
+      } else {
+        console.log(`[BITQUERY-EAP] ⚠️ No transactions found in ${timeWindowSeconds}s window`)
+      }
 
       // Store trade data for display
       autoSellState.marketTrades = [
@@ -1159,12 +1198,19 @@ async function collectBitqueryEAPData() {
           timestamp: Date.now(),
         },
       ]
+
+      return { buyVolumeUsd, sellVolumeUsd, netUsdFlow }
     } else {
       throw new Error(`Bitquery EAP API returned error: ${data.error}`)
     }
   } catch (error) {
     console.error("[BITQUERY-EAP] Data collection failed:", error)
     autoSellState.lastDataUpdateTime = Date.now()
+
+    autoSellState.metrics.buyVolumeUsd = 0
+    autoSellState.metrics.sellVolumeUsd = 0
+    autoSellState.metrics.netUsdFlow = 0
+
     return { buyVolumeUsd: 0, sellVolumeUsd: 0, netUsdFlow: 0 }
   }
 }
