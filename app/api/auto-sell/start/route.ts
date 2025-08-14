@@ -290,60 +290,95 @@ async function collectDirectSolanaTransactions() {
 
 function analyzeTokenSwapTransaction(tx: any, tokenMint: string) {
   try {
-    if (!tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) {
+    if (!tx.meta || !tx.meta.preTokenBalances || !tx.meta.postTokenBalances) {
       return null
     }
 
-    // Check if this transaction involves Jupiter or other DEX programs
-    const programIds = tx.transaction.message.staticAccountKeys || []
-    const jupiterPrograms = [
-      "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4", // Jupiter V6
-      "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB", // Jupiter V4
-    ]
+    // Find token balance changes for our specific mint
+    const preTokenBalances = tx.meta.preTokenBalances || []
+    const postTokenBalances = tx.meta.postTokenBalances || []
 
-    const isJupiterTx = programIds.some((id: string) => jupiterPrograms.includes(id))
+    let tokenBalanceChange = 0
+    let solBalanceChange = 0
 
-    // Look for SOL balance changes to determine buy/sell
-    const solBalanceChanges = tx.meta.postBalances.map(
-      (post: number, index: number) => post - tx.meta.preBalances[index],
-    )
-
-    // Find significant SOL balance changes (excluding small fee changes)
-    let maxSolChange = 0
-    let maxSolChangeIndex = -1
-
-    solBalanceChanges.forEach((change: number, index: number) => {
-      if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 10000) {
-        // Ignore changes smaller than 0.00001 SOL
-        maxSolChange = change
-        maxSolChangeIndex = index
+    // Check token balance changes for our mint
+    for (const preBalance of preTokenBalances) {
+      if (preBalance.mint === tokenMint) {
+        const postBalance = postTokenBalances.find(
+          (post: any) => post.accountIndex === preBalance.accountIndex && post.mint === tokenMint,
+        )
+        if (postBalance) {
+          const preAmount = Number(preBalance.uiTokenAmount?.uiAmount || 0)
+          const postAmount = Number(postBalance.uiTokenAmount?.uiAmount || 0)
+          tokenBalanceChange += postAmount - preAmount
+        }
       }
-    })
-
-    if (maxSolChangeIndex === -1) {
-      return null
     }
 
-    const solChange = maxSolChange / 1e9 // Convert lamports to SOL
+    // Also check for new token accounts (when someone buys for the first time)
+    for (const postBalance of postTokenBalances) {
+      if (postBalance.mint === tokenMint) {
+        const preBalance = preTokenBalances.find(
+          (pre: any) => pre.accountIndex === postBalance.accountIndex && pre.mint === tokenMint,
+        )
+        if (!preBalance) {
+          // New token account created, this is a buy
+          tokenBalanceChange += Number(postBalance.uiTokenAmount?.uiAmount || 0)
+        }
+      }
+    }
+
+    // If no significant token balance change, fall back to SOL analysis
+    if (Math.abs(tokenBalanceChange) < 0.001) {
+      const solBalanceChanges = tx.meta.postBalances.map(
+        (post: number, index: number) => post - tx.meta.preBalances[index],
+      )
+
+      let maxSolChange = 0
+      solBalanceChanges.forEach((change: number) => {
+        if (Math.abs(change) > Math.abs(maxSolChange) && Math.abs(change) > 10000) {
+          maxSolChange = change
+        }
+      })
+
+      solBalanceChange = maxSolChange / 1e9
+    }
+
     const solPriceUsd = autoSellState.metrics.solPriceUsd || 100
-    const usdAmount = Math.abs(solChange) * solPriceUsd
+    let usdAmount = 0
+    let type = ""
+
+    if (Math.abs(tokenBalanceChange) >= 0.001) {
+      // Use token balance change to determine type
+      // Positive token balance change = receiving tokens = buying
+      // Negative token balance change = sending tokens = selling
+      type = tokenBalanceChange > 0 ? "buy" : "sell"
+
+      // Estimate USD value from token amount and current price
+      const tokenPriceUsd = autoSellState.metrics.currentPriceUsd || 0.000001
+      usdAmount = Math.abs(tokenBalanceChange) * tokenPriceUsd
+    } else if (Math.abs(solBalanceChange) >= 0.00001) {
+      // Fall back to SOL balance analysis
+      // Negative SOL change = spending SOL = buying tokens
+      // Positive SOL change = receiving SOL = selling tokens
+      type = solBalanceChange < 0 ? "buy" : "sell"
+      usdAmount = Math.abs(solBalanceChange) * solPriceUsd
+    } else {
+      return null
+    }
 
     // Only process transactions with meaningful USD value
     if (usdAmount < 0.1) {
       return null
     }
 
-    // Determine if it's a buy or sell based on SOL flow
-    // Negative SOL change = buying tokens with SOL (spending SOL)
-    // Positive SOL change = selling tokens for SOL (receiving SOL)
-    const type = solChange < 0 ? "buy" : "sell"
-
     return {
       type,
-      solAmount: Math.abs(solChange),
+      solAmount: Math.abs(solBalanceChange),
+      tokenAmount: Math.abs(tokenBalanceChange),
       usdAmount,
       signature: tx.transaction.signatures[0],
-      isJupiterTx,
+      isJupiterTx: true,
     }
   } catch (error) {
     return null
