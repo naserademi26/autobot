@@ -27,6 +27,16 @@ const autoSellState = {
   intervals: [] as NodeJS.Timeout[],
 }
 
+process.on("uncaughtException", (error) => {
+  console.error("[CRASH-PREVENTION] Uncaught Exception:", error)
+  // Don't exit the process, just log the error
+})
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[CRASH-PREVENTION] Unhandled Rejection at:", promise, "reason:", reason)
+  // Don't exit the process, just log the error
+})
+
 export async function POST(request: NextRequest) {
   try {
     const { config, privateKeys } = await request.json()
@@ -92,8 +102,13 @@ export async function POST(request: NextRequest) {
     console.log("[AUTO-SELL] Fetching wallet balances immediately...")
     await updateAllWalletBalances()
 
-    // Start monitoring and execution intervals
-    await startAutoSellEngine()
+    try {
+      await startAutoSellEngine()
+    } catch (error) {
+      console.error("[AUTO-SELL] Failed to start engine:", error)
+      autoSellState.isRunning = false
+      return NextResponse.json({ error: "Failed to start auto-sell engine" }, { status: 500 })
+    }
 
     return NextResponse.json({
       success: true,
@@ -108,51 +123,67 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error("Error starting auto-sell:", error)
+    autoSellState.isRunning = false
     return NextResponse.json({ error: "Failed to start auto-sell engine" }, { status: 500 })
   }
 }
 
 async function startAutoSellEngine() {
-  // Clear any existing intervals
-  autoSellState.intervals.forEach((interval) => clearInterval(interval))
-  autoSellState.intervals = []
+  try {
+    // Clear any existing intervals
+    autoSellState.intervals.forEach((interval) => clearInterval(interval))
+    autoSellState.intervals = []
 
-  autoSellState.botStartTime = Date.now()
-  autoSellState.firstAnalysisTime = autoSellState.botStartTime
+    autoSellState.botStartTime = Date.now()
+    autoSellState.firstAnalysisTime = autoSellState.botStartTime
 
-  console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
-  console.log(`[AUTO-SELL] Starting immediate market analysis...`)
+    console.log(`[AUTO-SELL] Bot started at ${new Date(autoSellState.botStartTime).toISOString()}`)
+    console.log(`[AUTO-SELL] Starting immediate market analysis...`)
 
-  await updateTokenPrice()
-
-  await startConfigurableAnalysisCycle()
-
-  const balanceInterval = setInterval(async () => {
-    if (!autoSellState.isRunning) return
     try {
-      await updateAllWalletBalances()
-      console.log("[AUTO-SELL] Wallet balances updated")
+      await updateTokenPrice()
     } catch (error) {
-      console.error("Balance update error:", error)
+      console.error("[AUTO-SELL] Token price update failed:", error)
     }
-  }, 30000)
 
-  autoSellState.intervals.push(balanceInterval)
+    try {
+      await startConfigurableAnalysisCycle()
+    } catch (error) {
+      console.error("[AUTO-SELL] Analysis cycle start failed:", error)
+    }
+
+    const balanceInterval = setInterval(async () => {
+      if (!autoSellState.isRunning) return
+      try {
+        await updateAllWalletBalances()
+        console.log("[AUTO-SELL] Wallet balances updated")
+      } catch (error) {
+        console.error("Balance update error:", error)
+        // Don't crash, just continue
+      }
+    }, 30000)
+
+    autoSellState.intervals.push(balanceInterval)
+  } catch (error) {
+    console.error("[AUTO-SELL] Critical error in startAutoSellEngine:", error)
+    autoSellState.isRunning = false
+    throw error
+  }
 }
 
-function startConfigurableAnalysisCycle() {
-  updateSolPrice()
+async function startConfigurableAnalysisCycle() {
+  const timeWindowSeconds = autoSellState.config?.timeWindowSeconds || 30
+  const scanIntervalSeconds = 10 // Scan every 10 seconds
 
-  const timeWindowSeconds = autoSellState.config.timeWindowSeconds
-  const scanIntervalSeconds = 10 // Scan every 10 seconds for comprehensive coverage
+  console.log(`[AUTO-SELL] Starting ${timeWindowSeconds}-second analysis cycle (scan every ${scanIntervalSeconds}s)`)
 
-  console.log(
-    `[AUTO-SELL] Starting ${timeWindowSeconds}-second analysis with ${scanIntervalSeconds}-second scanning...`,
-  )
-
-  // Run first analysis immediately
-  collectMarketDataForConfigurableWindow()
-  analyzeAndExecuteAutoSell()
+  try {
+    await collectMarketDataForConfigurableWindow()
+    await analyzeAndExecuteAutoSell()
+  } catch (error) {
+    console.error("[AUTO-SELL] Initial analysis failed:", error)
+    // Don't crash, continue with interval
+  }
 
   const analysisInterval = setInterval(async () => {
     if (!autoSellState.isRunning) {
@@ -168,8 +199,9 @@ function startConfigurableAnalysisCycle() {
       await analyzeAndExecuteAutoSell()
     } catch (error) {
       console.error(`[AUTO-SELL] ${timeWindowSeconds}-second analysis error:`, error)
+      // Don't crash the interval, just log and continue
     }
-  }, scanIntervalSeconds * 1000) // Scan every 10 seconds instead of every time window
+  }, scanIntervalSeconds * 1000)
 
   autoSellState.intervals.push(analysisInterval)
 }
@@ -715,7 +747,7 @@ async function analyzeAndExecuteAutoSell() {
       console.log(`[AUTO-SELL] Step 2 Complete: Total tokens = ${totalTokens.toFixed(4)}`)
 
       console.log(`[AUTO-SELL] Step 3: Executing coordinated sell...`)
-      await executeCoordinatedSell(sellAmountUsd)
+      await executeCoordinatedSell(netUsdFlow)
       console.log(`[AUTO-SELL] Step 3 Complete: Sell execution finished`)
     } else {
       console.log(
@@ -728,10 +760,10 @@ async function analyzeAndExecuteAutoSell() {
   }
 }
 
-async function executeCoordinatedSell(sellAmountUsd: number) {
+async function executeCoordinatedSell(netUsdFlow: number) {
   try {
     console.log(`[AUTO-SELL] 🎯 STARTING COORDINATED SELL EXECUTION`)
-    console.log(`[AUTO-SELL] Target sell amount: $${sellAmountUsd.toFixed(2)} USD`)
+    console.log(`[AUTO-SELL] Target sell amount: $${netUsdFlow.toFixed(2)} USD`)
 
     console.log(`[AUTO-SELL] 🔄 Fetching accurate token price...`)
     let effectivePriceUsd = 0
@@ -778,9 +810,9 @@ async function executeCoordinatedSell(sellAmountUsd: number) {
       console.log(`[AUTO-SELL] ⚠️ Using emergency fallback price: $${effectivePriceUsd.toFixed(8)}`)
     }
 
-    const tokensToSell = sellAmountUsd / effectivePriceUsd
+    const tokensToSell = netUsdFlow / effectivePriceUsd
     console.log(
-      `[AUTO-SELL] Token calculation: $${sellAmountUsd.toFixed(2)} ÷ $${effectivePriceUsd.toFixed(8)} = ${tokensToSell.toFixed(4)} tokens`,
+      `[AUTO-SELL] Token calculation: $${netUsdFlow.toFixed(2)} ÷ $${effectivePriceUsd.toFixed(8)} = ${tokensToSell.toFixed(4)} tokens`,
     )
 
     console.log(`[AUTO-SELL] 🔍 Validating wallets...`)
@@ -838,8 +870,11 @@ async function executeCoordinatedSell(sellAmountUsd: number) {
     })
 
     console.log(`[AUTO-SELL] ⏳ Waiting for all ${walletsWithTokens.length} sell transactions...`)
-    const results = await Promise.all(sellPromises)
-    const successfulSells = results.filter((result) => result !== null)
+
+    const results = await Promise.allSettled(sellPromises)
+    const successfulSells = results
+      .filter((result) => result.status === "fulfilled" && result.value !== null)
+      .map((result) => (result as PromiseFulfilledResult<any>).value)
 
     if (successfulSells.length > 0) {
       const totalSold = successfulSells.reduce((sum, result) => sum + result.amount, 0)
@@ -856,14 +891,18 @@ async function executeCoordinatedSell(sellAmountUsd: number) {
       )
 
       console.log(`[AUTO-SELL] 🔄 Updating wallet balances after execution...`)
-      await updateAllWalletBalances()
-      console.log(`[AUTO-SELL] ✅ Balance update complete`)
+      try {
+        await updateAllWalletBalances()
+        console.log(`[AUTO-SELL] ✅ Balance update complete`)
+      } catch (error) {
+        console.error("[AUTO-SELL] Balance update failed after sell:", error)
+      }
     } else {
       console.log("[AUTO-SELL] ❌ COMPLETE FAILURE: No successful sells executed")
     }
   } catch (error) {
     console.error("[AUTO-SELL] ❌ CRITICAL ERROR in executeCoordinatedSell:", error)
-    throw error
+    // Don't re-throw, just log and continue
   }
 }
 
@@ -929,99 +968,109 @@ async function updateTokenPrice() {
 }
 
 async function executeSell(wallet: any, amount: number) {
-  const axios = await import("axios")
-  const { Connection, VersionedTransaction } = await import("@solana/web3.js")
-
-  const connection = new Connection(
-    process.env.NEXT_PUBLIC_RPC_URL ||
-      process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
-      "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
-    { commitment: "confirmed" },
-  )
-
-  const { getMint } = await import("@solana/spl-token")
-  const { PublicKey } = await import("@solana/web3.js")
-  const mintInfo = await getMint(connection, new PublicKey(autoSellState.config.mint))
-  const decimals = mintInfo.decimals
-
-  const amountInAtoms = BigInt(Math.floor(amount * 10 ** decimals)).toString()
-
-  const jupiterBase = process.env.JUPITER_BASE || "https://quote-api.jup.ag"
-  const outputMint = "So11111111111111111111111111111111111111112" // SOL
-
-  const quoteResponse = await axios.default.get(`${jupiterBase}/v6/quote`, {
-    params: {
-      inputMint: autoSellState.config.mint,
-      outputMint: outputMint,
-      amount: amountInAtoms,
-      slippageBps: autoSellState.config.slippageBps || 300,
-    },
-  })
-
-  const swapResponse = await axios.default.post(`${jupiterBase}/v6/swap`, {
-    userPublicKey: wallet.keypair.publicKey.toBase58(),
-    quoteResponse: quoteResponse.data,
-  })
-
-  const tx = VersionedTransaction.deserialize(Buffer.from(swapResponse.data.swapTransaction, "base64"))
-  tx.sign([wallet.keypair])
-
-  const bloxrouteAuth = process.env.BLOXROUTE_API_KEY
-  if (bloxrouteAuth) {
-    try {
-      const serializedTx = Buffer.from(tx.serialize()).toString("base64")
-      const bloxrouteUrl = process.env.BLOXROUTE_SUBMIT_URL || "https://ny.solana.dex.blxrbdn.com"
-
-      console.log(`[BLOXROUTE] Attempting submission with auth header...`)
-
-      const response = await axios.default.post(
-        `${bloxrouteUrl}/api/v2/submit`,
-        {
-          transaction: {
-            content: serializedTx,
-            encoding: "base64",
-          },
-        },
-        {
-          headers: {
-            Authorization: bloxrouteAuth, // Use the raw API key as provided by user
-            "Content-Type": "application/json",
-          },
-          timeout: 10000,
-        },
-      )
-
-      if (response.data?.signature) {
-        console.log(`[BLOXROUTE] Transaction submitted successfully: ${response.data.signature}`)
-        return response.data.signature
-      } else {
-        throw new Error("No signature returned from bloXroute")
-      }
-    } catch (error: any) {
-      console.error("bloXroute submission failed:", {
-        message: error.message,
-        status: error.response?.status,
-        statusText: error.response?.statusText,
-        data: error.response?.data,
-        url: error.config?.url,
-        headers: error.config?.headers,
-      })
-      console.log("Falling back to RPC submission...")
-    }
-  } else {
-    console.log("[BLOXROUTE] No API key configured, using RPC submission...")
-  }
-
   try {
-    const signature = await connection.sendTransaction(tx, {
-      skipPreflight: true,
-      maxRetries: 3,
+    const axios = await import("axios")
+    const { Connection, VersionedTransaction } = await import("@solana/web3.js")
+
+    const connection = new Connection(
+      process.env.NEXT_PUBLIC_RPC_URL ||
+        process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+        "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+      { commitment: "confirmed" },
+    )
+
+    const { getMint } = await import("@solana/spl-token")
+    const { PublicKey } = await import("@solana/web3.js")
+    const mintInfo = await getMint(connection, new PublicKey(autoSellState.config.mint))
+    const decimals = mintInfo.decimals
+
+    const amountInAtoms = BigInt(Math.floor(amount * 10 ** decimals)).toString()
+
+    const jupiterBase = process.env.JUPITER_BASE || "https://quote-api.jup.ag"
+    const outputMint = "So11111111111111111111111111111111111111112" // SOL
+
+    const quoteResponse = await axios.default.get(`${jupiterBase}/v6/quote`, {
+      params: {
+        inputMint: autoSellState.config.mint,
+        outputMint: outputMint,
+        amount: amountInAtoms,
+        slippageBps: autoSellState.config.slippageBps || 300,
+      },
     })
-    console.log(`[RPC] Transaction submitted: ${signature}`)
-    await connection.confirmTransaction(signature, "confirmed")
-    return signature
+
+    const swapResponse = await axios.default.post(`${jupiterBase}/v6/swap`, {
+      userPublicKey: wallet.keypair.publicKey.toBase58(),
+      quoteResponse: quoteResponse.data,
+    })
+
+    const tx = VersionedTransaction.deserialize(Buffer.from(swapResponse.data.swapTransaction, "base64"))
+    tx.sign([wallet.keypair])
+
+    const bloxrouteAuth = process.env.BLOXROUTE_API_KEY
+    if (bloxrouteAuth) {
+      try {
+        const serializedTx = Buffer.from(tx.serialize()).toString("base64")
+        const bloxrouteUrl = process.env.BLOXROUTE_SUBMIT_URL || "https://ny.solana.dex.blxrbdn.com"
+
+        console.log(`[BLOXROUTE] Attempting submission with auth header...`)
+
+        const response = await axios.default.post(
+          `${bloxrouteUrl}/api/v2/submit`,
+          {
+            transaction: {
+              content: serializedTx,
+              encoding: "base64",
+            },
+          },
+          {
+            headers: {
+              Authorization: bloxrouteAuth,
+              "Content-Type": "application/json",
+            },
+            timeout: 10000,
+          },
+        )
+
+        if (response.data?.signature) {
+          console.log(`[BLOXROUTE] Transaction submitted successfully: ${response.data.signature}`)
+          return response.data.signature
+        } else {
+          throw new Error("No signature returned from bloXroute")
+        }
+      } catch (error: any) {
+        console.error("bloXroute submission failed:", {
+          message: error.message,
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+        })
+        console.log("Falling back to RPC submission...")
+      }
+    }
+
+    try {
+      const signature = (await Promise.race([
+        connection.sendTransaction(tx, {
+          skipPreflight: true,
+          maxRetries: 3,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("RPC submission timeout")), 30000)),
+      ])) as string
+
+      console.log(`[RPC] Transaction submitted: ${signature}`)
+
+      // Don't wait for confirmation to prevent hanging
+      connection.confirmTransaction(signature, "confirmed").catch((error) => {
+        console.error(`[RPC] Confirmation failed for ${signature}:`, error)
+      })
+
+      return signature
+    } catch (error) {
+      console.error("RPC submission failed:", error)
+      throw error
+    }
   } catch (error) {
-    console.error("RPC submission also failed:", error)
+    console.error(`[SELL] Failed to execute sell for wallet ${wallet.publicKey}:`, error)
     throw error
   }
 }
