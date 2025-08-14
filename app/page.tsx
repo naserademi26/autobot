@@ -112,6 +112,7 @@ function sanitizeMintInput(input: string): string {
 export default function AutoSellDashboard() {
   const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
 
   // Wallet management
   const [vaultKeys, setVaultKeys] = useState<string>("")
@@ -163,67 +164,116 @@ export default function AutoSellDashboard() {
   useEffect(() => {
     if (!mint) return
 
-    const eventSource = new EventSource(`/api/trades/stream?mint=${mint}`)
+    let eventSource: EventSource | null = null
+    let retryCount = 0
+    const maxRetries = 3 // Reduced max retries for faster feedback
 
-    eventSource.addEventListener("snapshot", (event) => {
+    const connectEventSource = () => {
       try {
-        const data = JSON.parse(event.data)
-        setStatus((prev) => ({
-          ...prev,
-          metrics: {
-            ...prev.metrics,
-            ...data,
-          },
-          transactionHistory: data.transactionHistory || [],
-        }))
-      } catch (error) {
-        console.error("Failed to parse snapshot data:", error)
-      }
-    })
+        const apiBase = process.env.NEXT_PUBLIC_API_BASE || ""
+        const url = apiBase
+          ? `${apiBase}/api/trades/stream?mint=${encodeURIComponent(mint)}`
+          : `/api/trades/stream?mint=${encodeURIComponent(mint)}`
+        console.log(`Connecting to EventSource: ${url}`)
+        eventSource = new EventSource(url, { withCredentials: false })
 
-    eventSource.addEventListener("update", (event) => {
-      try {
-        const data = JSON.parse(event.data)
-        setStatus((prev) => ({
-          ...prev,
-          metrics: {
-            ...prev.metrics,
-            ...data,
-          },
-        }))
-      } catch (error) {
-        console.error("Failed to parse update data:", error)
-      }
-    })
-
-    eventSource.addEventListener("trades", (event) => {
-      try {
-        const trades: Trade[] = JSON.parse(event.data)
-        setRecentTrades(trades)
-      } catch (error) {
-        console.error("Failed to parse trades data:", error)
-      }
-    })
-
-    eventSource.addEventListener("newTrades", (event) => {
-      try {
-        const newTrades: Trade[] = JSON.parse(event.data)
-        setRecentTrades((prev) => {
-          const combined = [...newTrades, ...prev]
-          const unique = combined.filter((trade, index, arr) => arr.findIndex((t) => t.sig === trade.sig) === index)
-          return unique.slice(0, 100)
+        eventSource.addEventListener("connected", (event) => {
+          console.log("EventSource connected:", event.data)
+          retryCount = 0
+          setConnectionError(null)
+          setLog("✅ Real-time connection established")
         })
-      } catch (error) {
-        console.error("Failed to parse new trades data:", error)
-      }
-    })
 
-    eventSource.onerror = () => {
-      console.error("EventSource connection error")
+        eventSource.addEventListener("snapshot", (event) => {
+          try {
+            const trades = JSON.parse(event.data)
+            console.log("Received snapshot:", trades)
+            setRecentTrades(Array.isArray(trades) ? trades : [])
+          } catch (error) {
+            console.error("Failed to parse snapshot data:", error)
+          }
+        })
+
+        eventSource.addEventListener("update", (event) => {
+          try {
+            const data = JSON.parse(event.data)
+            console.log("Received update:", data)
+            setStatus((prev) => ({
+              ...prev,
+              metrics: {
+                ...prev.metrics,
+                buyVolumeUsd: data.buyVolumeUsd || prev.metrics.buyVolumeUsd,
+                sellVolumeUsd: data.sellVolumeUsd || prev.metrics.sellVolumeUsd,
+                netUsdFlow: data.netUsdFlow || prev.metrics.netUsdFlow,
+                currentPrice: data.currentPrice || prev.metrics.currentPrice,
+                currentPriceUsd: data.currentPriceUsd || prev.metrics.currentPriceUsd,
+              },
+              isRunning: data.isRunning !== undefined ? data.isRunning : prev.isRunning,
+            }))
+          } catch (error) {
+            console.error("Failed to parse update data:", error)
+          }
+        })
+
+        eventSource.addEventListener("trades", (event) => {
+          try {
+            const trades: Trade[] = JSON.parse(event.data)
+            console.log("Received trades:", trades)
+            setRecentTrades(trades)
+          } catch (error) {
+            console.error("Failed to parse trades data:", error)
+          }
+        })
+
+        eventSource.addEventListener("newTrades", (event) => {
+          try {
+            const newTrades: Trade[] = JSON.parse(event.data)
+            console.log("Received new trades:", newTrades)
+            setRecentTrades((prev) => {
+              const combined = [...newTrades, ...prev]
+              const unique = combined.filter((trade, index, arr) => arr.findIndex((t) => t.sig === trade.sig) === index)
+              return unique.slice(0, 50) // Reduced to 50 trades for better performance
+            })
+          } catch (error) {
+            console.error("Failed to parse new trades data:", error)
+          }
+        })
+
+        eventSource.onerror = (error) => {
+          console.error("EventSource connection error:", error)
+          setConnectionError(`Connection error (attempt ${retryCount + 1}/${maxRetries})`)
+          eventSource?.close()
+
+          if (retryCount < maxRetries) {
+            retryCount++
+            const delay = Math.min(2000 * retryCount, 10000)
+            console.log(`Retrying EventSource connection in ${delay}ms...`)
+            setTimeout(connectEventSource, delay)
+          } else {
+            console.error("Max retries reached for EventSource connection")
+            setConnectionError("❌ Connection failed - Redis may not be configured")
+            setLog(
+              "❌ Real-time connection failed. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Project Settings.",
+            )
+          }
+        }
+
+        eventSource.onopen = () => {
+          console.log("EventSource connection opened")
+          setConnectionError(null)
+        }
+      } catch (error) {
+        console.error("Failed to create EventSource:", error)
+        setConnectionError("❌ Failed to establish connection")
+        setLog("❌ Connection setup failed")
+      }
     }
 
+    setTimeout(connectEventSource, 500)
+
     return () => {
-      eventSource.close()
+      console.log("Cleaning up EventSource connection")
+      eventSource?.close()
     }
   }, [mint])
 
@@ -1019,6 +1069,7 @@ export default function AutoSellDashboard() {
                 {log ||
                   `Real-time market momentum auto-sell ready. System uses Helius webhooks to monitor actual blockchain transactions and sells ${config.sellPercentageOfNetFlow}% of net positive USD flow when Net Flow > $0 (Buy Volume - Sell Volume).`}
               </pre>
+              {connectionError && <div className="mt-4 text-center text-sm text-rose-400">{connectionError}</div>}
             </CardContent>
           </Card>
         </div>

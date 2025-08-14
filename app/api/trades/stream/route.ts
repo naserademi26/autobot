@@ -2,93 +2,96 @@ export const runtime = "edge"
 
 import { type NextRequest, NextResponse } from "next/server"
 
-function encoder(s: string) {
-  return new TextEncoder().encode(s)
-}
+const enc = (s: string) => new TextEncoder().encode(s)
+const cors = (origin?: string | null) => ({
+  "Access-Control-Allow-Origin": origin || "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+})
 
-let redis: any = null
-async function getRedis() {
-  if (!redis) {
-    try {
-      const { Redis } = await import("@upstash/redis")
-      redis = Redis.fromEnv()
-    } catch (error) {
-      console.warn("Redis not available:", error)
-      return null
-    }
-  }
-  return redis
+export async function OPTIONS(req: NextRequest) {
+  return new NextResponse(null, { headers: cors(req.headers.get("origin")) })
 }
 
 export async function GET(req: NextRequest) {
-  const mint = req.nextUrl.searchParams.get("mint") || process.env.TOKEN_MINT!
-  const redisClient = await getRedis()
+  const origin = req.headers.get("origin")
+  const mint = req.nextUrl.searchParams.get("mint")
+  if (!mint) {
+    return NextResponse.json({ ok: false, error: "mint required" }, { status: 400, headers: cors(origin) })
+  }
+
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN
+  let redis: any = null
+
+  if (redisUrl && redisToken) {
+    try {
+      const { Redis } = await import("@upstash/redis")
+      redis = new Redis({ url: redisUrl, token: redisToken })
+    } catch (error) {
+      console.warn("Redis not available, using fallback:", error)
+    }
+  }
 
   const stream = new ReadableStream({
     start: async (controller) => {
-      if (redisClient) {
-        try {
-          const recentTrades = await redisClient.lrange(`trades:${mint}`, 0, 19) // Last 20 trades
-          const trades = recentTrades.map((trade: string) => JSON.parse(trade))
-
-          controller.enqueue(encoder(`event: trades\ndata: ${JSON.stringify(trades)}\n\n`))
-        } catch (error) {
-          console.warn("Failed to fetch recent trades:", error)
-        }
-      }
-
-      // Send current auto-sell state as snapshot
-      if (global.autoSellState) {
+      try {
         controller.enqueue(
-          encoder(
-            `event: snapshot\ndata: ${JSON.stringify({
-              buyVolumeUsd: global.autoSellState.metrics.buyVolumeUsd,
-              sellVolumeUsd: global.autoSellState.metrics.sellVolumeUsd,
-              netUsdFlow: global.autoSellState.metrics.netUsdFlow,
-              currentPrice: global.autoSellState.metrics.currentPrice,
-              isRunning: global.autoSellState.isRunning,
-              transactionHistory: global.autoSellState.transactionHistory || [],
-            })}\n\n`,
-          ),
+          enc(`event: connected\ndata: ${JSON.stringify({ status: "connected", mint, timestamp: Date.now() })}\n\n`),
         )
-      }
 
-      const interval = setInterval(async () => {
-        // Send updated metrics
-        if (global.autoSellState) {
-          controller.enqueue(
-            encoder(
-              `event: update\ndata: ${JSON.stringify({
-                buyVolumeUsd: global.autoSellState.metrics.buyVolumeUsd,
-                sellVolumeUsd: global.autoSellState.metrics.sellVolumeUsd,
-                netUsdFlow: global.autoSellState.metrics.netUsdFlow,
-                currentPrice: global.autoSellState.metrics.currentPrice,
-                lastSellTime: global.autoSellState.metrics.lastSellTime,
-                totalSold: global.autoSellState.metrics.totalSold,
-              })}\n\n`,
-            ),
-          )
-        }
-
-        if (redisClient) {
+        let initialTrades: any[] = []
+        if (redis) {
           try {
-            const latestTrades = await redisClient.lrange(`trades:${mint}`, 0, 4) // Last 5 trades
-            if (latestTrades.length > 0) {
-              const trades = latestTrades.map((trade: string) => JSON.parse(trade))
-              controller.enqueue(encoder(`event: newTrades\ndata: ${JSON.stringify(trades)}\n\n`))
-            }
+            const key = `trades:${mint}`
+            const recent = await redis.lrange<string>(key, 0, 199)
+            initialTrades = recent.map((t: string) => JSON.parse(t))
           } catch (error) {
-            console.warn("Failed to fetch latest trades:", error)
+            console.warn("Redis read failed, using empty snapshot:", error)
           }
         }
 
-        // Keepalive ping
-        controller.enqueue(encoder(`: ping ${Date.now()}\n\n`))
-      }, 1000) // Reduced interval to 1 second for more responsive updates
+        controller.enqueue(enc(`event: snapshot\ndata: ${JSON.stringify(initialTrades)}\n\n`))
 
-      return () => clearInterval(interval)
+        let seen = initialTrades.length
+        let lastPing = Date.now()
+
+        const loop = async () => {
+          try {
+            while (true) {
+              if (redis) {
+                try {
+                  const key = `trades:${mint}`
+                  const next = await redis.lrange<string>(key, 0, 99)
+                  if (next.length > seen) {
+                    const diff = next.slice(0, next.length - seen).map((t: string) => JSON.parse(t))
+                    controller.enqueue(enc(`event: trades\ndata: ${JSON.stringify(diff)}\n\n`))
+                    seen = next.length
+                  }
+                } catch (error) {
+                  console.warn("Redis polling error:", error)
+                }
+              }
+
+              const now = Date.now()
+              if (now - lastPing > 15000) {
+                controller.enqueue(enc(`: ping ${now}\n\n`)) // keep-alive
+                lastPing = now
+              }
+              await new Promise((r) => setTimeout(r, 900))
+            }
+          } catch (error) {
+            console.error("Stream loop error:", error)
+            controller.close()
+          }
+        }
+
+        loop()
+      } catch (error) {
+        console.error("Stream start error:", error)
+        controller.close()
+      }
     },
-    cancel() {},
   })
 
   return new NextResponse(stream, {
@@ -96,6 +99,8 @@ export async function GET(req: NextRequest) {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // Disable nginx buffering
+      ...cors(origin),
     },
   })
 }
