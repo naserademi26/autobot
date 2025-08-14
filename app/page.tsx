@@ -166,16 +166,13 @@ export default function AutoSellDashboard() {
 
     let eventSource: EventSource | null = null
     let retryCount = 0
-    const maxRetries = 3 // Reduced max retries for faster feedback
+    const maxRetries = 3
 
     const connectEventSource = () => {
       try {
-        const apiBase = process.env.NEXT_PUBLIC_API_BASE || ""
-        const url = apiBase
-          ? `${apiBase}/api/trades/stream?mint=${encodeURIComponent(mint)}`
-          : `/api/trades/stream?mint=${encodeURIComponent(mint)}`
+        const url = `/api/stream?mint=${encodeURIComponent(mint)}`
         console.log(`Connecting to EventSource: ${url}`)
-        eventSource = new EventSource(url, { withCredentials: false })
+        eventSource = new EventSource(url)
 
         eventSource.addEventListener("connected", (event) => {
           console.log("EventSource connected:", event.data)
@@ -186,7 +183,7 @@ export default function AutoSellDashboard() {
 
         eventSource.addEventListener("snapshot", (event) => {
           try {
-            const trades = JSON.parse(event.data)
+            const trades = JSON.parse((event as MessageEvent).data)
             console.log("Received snapshot:", trades)
             setRecentTrades(Array.isArray(trades) ? trades : [])
           } catch (error) {
@@ -196,7 +193,7 @@ export default function AutoSellDashboard() {
 
         eventSource.addEventListener("update", (event) => {
           try {
-            const data = JSON.parse(event.data)
+            const data = JSON.parse((event as MessageEvent).data)
             console.log("Received update:", data)
             setStatus((prev) => ({
               ...prev,
@@ -217,25 +214,11 @@ export default function AutoSellDashboard() {
 
         eventSource.addEventListener("trades", (event) => {
           try {
-            const trades: Trade[] = JSON.parse(event.data)
+            const trades: Trade[] = JSON.parse((event as MessageEvent).data)
             console.log("Received trades:", trades)
-            setRecentTrades(trades)
+            setRecentTrades((prev) => [...trades, ...prev].slice(0, 500))
           } catch (error) {
             console.error("Failed to parse trades data:", error)
-          }
-        })
-
-        eventSource.addEventListener("newTrades", (event) => {
-          try {
-            const newTrades: Trade[] = JSON.parse(event.data)
-            console.log("Received new trades:", newTrades)
-            setRecentTrades((prev) => {
-              const combined = [...newTrades, ...prev]
-              const unique = combined.filter((trade, index, arr) => arr.findIndex((t) => t.sig === trade.sig) === index)
-              return unique.slice(0, 50) // Reduced to 50 trades for better performance
-            })
-          } catch (error) {
-            console.error("Failed to parse new trades data:", error)
           }
         })
 
@@ -246,15 +229,13 @@ export default function AutoSellDashboard() {
 
           if (retryCount < maxRetries) {
             retryCount++
-            const delay = Math.min(2000 * retryCount, 10000)
+            const delay = 2000
             console.log(`Retrying EventSource connection in ${delay}ms...`)
             setTimeout(connectEventSource, delay)
           } else {
             console.error("Max retries reached for EventSource connection")
-            setConnectionError("❌ Connection failed - Redis may not be configured")
-            setLog(
-              "❌ Real-time connection failed. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN in Project Settings.",
-            )
+            setConnectionError("❌ Connection failed")
+            setLog("❌ Real-time connection failed")
           }
         }
 
