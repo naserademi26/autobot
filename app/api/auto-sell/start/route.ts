@@ -593,22 +593,30 @@ async function collectMarketDataForConfigurableWindow() {
 
     await updateTokenPrice()
 
-    // Try Solana RPC first (most accurate)
     try {
-      await collectDirectSolanaTransactions()
-      console.log("[SOLANA-RPC] Successfully collected real transaction data as primary source")
+      await collectBitqueryEAPData()
+      console.log("[BITQUERY-EAP] Successfully collected real-time DEX data as primary source")
       return
     } catch (error) {
-      console.log("[SOLANA-RPC] Primary failed, trying DexTools:", error.message)
+      console.log("[BITQUERY-EAP] Primary failed, trying Solana RPC:", error.message)
     }
 
-    // Try DexTools API as secondary option
+    // Try Solana RPC as secondary option
     try {
-      await collectDexToolsData()
-      console.log("[DEXTOOLS] Successfully collected transaction data as secondary source")
+      await collectDirectSolanaTransactions()
+      console.log("[SOLANA-RPC] Successfully collected real transaction data as secondary source")
       return
     } catch (error) {
-      console.log("[DEXTOOLS] Secondary failed, falling back to DexScreener:", error.message)
+      console.log("[SOLANA-RPC] Secondary failed, trying DexTools:", error.message)
+    }
+
+    // Try DexTools API as tertiary option
+    try {
+      await collectDexToolsData()
+      console.log("[DEXTOOLS] Successfully collected transaction data as tertiary source")
+      return
+    } catch (error) {
+      console.log("[DEXTOOLS] Tertiary failed, falling back to DexScreener:", error.message)
     }
 
     // Use DexScreener as final fallback
@@ -1087,5 +1095,60 @@ async function collectDexScreenerData() {
     autoSellState.metrics.buyVolumeUsd = 0
     autoSellState.metrics.sellVolumeUsd = 0
     autoSellState.metrics.netUsdFlow = 0
+  }
+}
+
+async function collectBitqueryEAPData() {
+  if (!autoSellState.config) {
+    console.error("[BITQUERY-EAP] Error: autoSellState.config is null")
+    return
+  }
+
+  try {
+    console.log("[BITQUERY-EAP] Using Bitquery EAP API for real-time DEX data")
+
+    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
+    const mint = autoSellState.config.mint
+
+    // Call our EAP API endpoint
+    const response = await fetch(`/api/eap?mints=${mint}&seconds=${timeWindowSeconds}`)
+
+    if (!response.ok) {
+      throw new Error(`Bitquery EAP API error: ${response.status}`)
+    }
+
+    const data = await response.json()
+
+    if (data.ok) {
+      const buyVolumeUsd = Number(data.buyers_usd || 0)
+      const sellVolumeUsd = Number(data.sellers_usd || 0)
+      const netUsdFlow = Number(data.net_usd || 0)
+      const tradesCount = Number(data.trades_count || 0)
+
+      autoSellState.metrics.buyVolumeUsd = buyVolumeUsd
+      autoSellState.metrics.sellVolumeUsd = sellVolumeUsd
+      autoSellState.metrics.netUsdFlow = netUsdFlow
+
+      console.log(
+        `[BITQUERY-EAP] ✅ REAL-TIME DATA: Buy: $${buyVolumeUsd.toFixed(2)} | Sell: $${sellVolumeUsd.toFixed(2)} | Net: $${netUsdFlow.toFixed(2)} | Trades: ${tradesCount}`,
+      )
+
+      // Store trade data for display
+      autoSellState.marketTrades = [
+        {
+          source: "bitquery-eap",
+          buyVolumeUsd,
+          sellVolumeUsd,
+          netUsdFlow,
+          tradesCount,
+          timestamp: Date.now(),
+        },
+      ]
+    } else {
+      throw new Error(`Bitquery EAP API returned error: ${data.error}`)
+    }
+  } catch (error) {
+    console.error("[BITQUERY-EAP] Data collection failed:", error)
+    throw error
   }
 }
