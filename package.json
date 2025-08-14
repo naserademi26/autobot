@@ -41,7 +41,6 @@
     "@solana/web3.js": "latest",
     "@upstash/redis": "latest",
     "autoprefixer": "^10.4.20",
-    "axios": "latest",
     "bs58": "latest",
     "buffer": "latest",
     "class-variance-authority": "^0.7.1",
