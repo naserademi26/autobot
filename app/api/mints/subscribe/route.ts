@@ -14,24 +14,60 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "Missing HELIUS_API_KEY/WEBHOOK_ID" }, { status: 500 })
   }
 
-  const base = `https://api.helius.xyz/v0/webhooks/${wid}?api-key=${key}`
-  const getRes = await fetch(base)
-  if (!getRes.ok) return NextResponse.json({ ok: false, error: "Failed to fetch webhook" }, { status: 502 })
-  const cfg = await getRes.json()
+  const base = `https://api.helius.xyz/v0/webhooks/${wid}`
 
-  const list: string[] = Array.isArray(cfg.accountAddresses) ? cfg.accountAddresses : []
-  if (!list.includes(mint)) list.push(mint)
+  try {
+    const getRes = await fetch(`${base}?api-key=${key}`)
+    if (!getRes.ok) {
+      const errorText = await getRes.text()
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Failed to fetch webhook",
+          details: errorText,
+        },
+        { status: 502 },
+      )
+    }
 
-  const patchRes = await fetch(base, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ accountAddresses: list }),
-  })
+    const cfg = await getRes.json()
+    const list: string[] = Array.isArray(cfg.accountAddresses) ? cfg.accountAddresses : []
 
-  if (!patchRes.ok) {
-    const txt = await patchRes.text()
-    return NextResponse.json({ ok: false, error: "Failed to update webhook", details: txt }, { status: 502 })
+    if (!list.includes(mint)) {
+      list.push(mint)
+
+      const putRes = await fetch(`${base}?api-key=${key}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...cfg,
+          accountAddresses: list,
+        }),
+      })
+
+      if (!putRes.ok) {
+        const txt = await putRes.text()
+        return NextResponse.json(
+          {
+            ok: false,
+            error: "Failed to update webhook",
+            details: txt,
+            webhookId: wid,
+          },
+          { status: 502 },
+        )
+      }
+    }
+
+    return NextResponse.json({ ok: true, watching: mint, total: list.length })
+  } catch (error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Request failed",
+        details: error instanceof Error ? error.message : String(error),
+      },
+      { status: 500 },
+    )
   }
-
-  return NextResponse.json({ ok: true, watching: mint, total: list.length })
 }
