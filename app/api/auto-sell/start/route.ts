@@ -613,33 +613,57 @@ async function collectDexToolsData() {
             processedCount++
 
             console.log(`[DEXTOOLS] 🔍 TRANSACTION ${processedCount}:`)
-            console.log(`[DEXTOOLS] - Type: "${tx.type || tx.side || tx.action}"`)
+            console.log(`[DEXTOOLS] - Raw Type: "${tx.type || tx.side || tx.action}"`)
             console.log(`[DEXTOOLS] - Amount USD: $${usdAmount.toFixed(6)}`)
+            console.log(`[DEXTOOLS] - Token Amount: ${tx.tokenAmount || "N/A"}`)
             console.log(`[DEXTOOLS] - Time: ${new Date(txTime).toLocaleTimeString()}`)
             console.log(`[DEXTOOLS] - Age: ${((Date.now() - txTime) / 1000).toFixed(1)}s ago`)
 
             if (usdAmount >= 0.0001) {
-              const txType = (tx.type || tx.side || tx.action || "").toLowerCase()
+              const rawType = (tx.type || tx.side || tx.action || "").toLowerCase()
+              let finalType = null
 
-              if (txType === "buy" || txType === "purchase") {
+              // Method 1: Direct type from API
+              if (rawType === "buy" || rawType === "purchase") {
+                finalType = "buy"
+              } else if (rawType === "sell" || rawType === "sale") {
+                finalType = "sell"
+              }
+
+              // Method 2: Token amount analysis (positive = received tokens = buy, negative = sent tokens = sell)
+              if (!finalType && tx.tokenAmount) {
+                const tokenAmount = Number(tx.tokenAmount)
+                if (tokenAmount > 0) {
+                  finalType = "buy"
+                  console.log(`[DEXTOOLS] 🔍 INFERRED FROM TOKEN AMOUNT: +${tokenAmount} = BUY`)
+                } else if (tokenAmount < 0) {
+                  finalType = "sell"
+                  console.log(`[DEXTOOLS] 🔍 INFERRED FROM TOKEN AMOUNT: ${tokenAmount} = SELL`)
+                }
+              }
+
+              // Method 3: Price impact analysis (if available)
+              if (!finalType && tx.priceImpact) {
+                const priceImpact = Number(tx.priceImpact)
+                if (priceImpact > 0) {
+                  finalType = "buy" // Positive price impact = buying pressure
+                } else if (priceImpact < 0) {
+                  finalType = "sell" // Negative price impact = selling pressure
+                }
+              }
+
+              console.log(`[DEXTOOLS] 🎯 FINAL TYPE DETERMINATION: "${rawType}" → "${finalType}"`)
+
+              if (finalType === "buy") {
                 totalBuyVolumeUsd += usdAmount
                 buyCount++
-                console.log(`[DEXTOOLS] ✅ ADDED TO BUY PRESSURE: $${usdAmount.toFixed(6)}`)
-              } else if (txType === "sell" || txType === "sale") {
+                console.log(`[DEXTOOLS] ✅ CONFIRMED BUY: $${usdAmount.toFixed(6)} → BUY PRESSURE`)
+              } else if (finalType === "sell") {
                 totalSellVolumeUsd += usdAmount
                 sellCount++
-                console.log(`[DEXTOOLS] ❌ ADDED TO SELL PRESSURE: $${usdAmount.toFixed(6)}`)
+                console.log(`[DEXTOOLS] ❌ CONFIRMED SELL: $${usdAmount.toFixed(6)} → SELL PRESSURE`)
               } else {
-                console.log(`[DEXTOOLS] ❓ UNKNOWN TYPE: "${txType}" - $${usdAmount.toFixed(6)}`)
-                if (tx.tokenAmount && Number(tx.tokenAmount) > 0) {
-                  totalBuyVolumeUsd += usdAmount
-                  buyCount++
-                  console.log(`[DEXTOOLS] ✅ INFERRED AS BUY: $${usdAmount.toFixed(6)}`)
-                } else if (tx.tokenAmount && Number(tx.tokenAmount) < 0) {
-                  totalSellVolumeUsd += usdAmount
-                  sellCount++
-                  console.log(`[DEXTOOLS] ❌ INFERRED AS SELL: $${usdAmount.toFixed(6)}`)
-                }
+                console.log(`[DEXTOOLS] ❓ UNKNOWN TYPE: "${rawType}" - $${usdAmount.toFixed(6)} - SKIPPED`)
               }
             } else {
               console.log(`[DEXTOOLS] ⚠️ Skipped (amount too small): $${usdAmount.toFixed(8)}`)
@@ -656,6 +680,12 @@ async function collectDexToolsData() {
       console.log(`[DEXTOOLS] - Sell Transactions: ${sellCount} totaling $${totalSellVolumeUsd.toFixed(6)}`)
       console.log(`[DEXTOOLS] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(6)}`)
 
+      console.log(`[DEXTOOLS] 🔄 ASSIGNING TO METRICS:`)
+      console.log(`[DEXTOOLS] - buyVolumeUsd = $${totalBuyVolumeUsd.toFixed(6)} (from ${buyCount} buy transactions)`)
+      console.log(
+        `[DEXTOOLS] - sellVolumeUsd = $${totalSellVolumeUsd.toFixed(6)} (from ${sellCount} sell transactions)`,
+      )
+
       autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
       autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
       autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
@@ -664,6 +694,11 @@ async function collectDexToolsData() {
       autoSellState.metrics.dataSourceConfidence = Math.min(100, (processedCount / Math.max(1, data.data.length)) * 100)
 
       console.log(`[DEXTOOLS] ✅ SUCCESS - Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}%`)
+      console.log(`[DEXTOOLS] 🎯 FINAL METRICS CHECK:`)
+      console.log(`[DEXTOOLS] - Buy Volume: $${autoSellState.metrics.buyVolumeUsd.toFixed(6)}`)
+      console.log(`[DEXTOOLS] - Sell Volume: $${autoSellState.metrics.sellVolumeUsd.toFixed(6)}`)
+      console.log(`[DEXTOOLS] - Net Flow: $${autoSellState.metrics.netUsdFlow.toFixed(6)}`)
+
       return // Success, exit retry loop
     } catch (error) {
       lastError = error
