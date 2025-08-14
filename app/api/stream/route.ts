@@ -13,19 +13,18 @@ export async function GET(req: NextRequest) {
 
   const stream = new ReadableStream({
     start(controller) {
+      let interval: NodeJS.Timeout | null = null
+      let cleanup: (() => void) | null = null
+
       try {
-        // Send initial connection event
         const connectEvent = `event: connected\ndata: ${JSON.stringify({ status: "connected", mint })}\n\n`
         controller.enqueue(encoder.encode(connectEvent))
 
-        // Send initial snapshot
         const snapshotEvent = `event: snapshot\ndata: ${JSON.stringify([])}\n\n`
         controller.enqueue(encoder.encode(snapshotEvent))
 
-        // Send periodic updates
-        const interval = setInterval(() => {
+        interval = setInterval(() => {
           try {
-            // Get current auto-sell state if available
             const autoSellState = (global as any).autoSellState
 
             const metrics = {
@@ -40,23 +39,20 @@ export async function GET(req: NextRequest) {
 
             const updateEvent = `event: update\ndata: ${JSON.stringify(metrics)}\n\n`
             controller.enqueue(encoder.encode(updateEvent))
-
-            // Send keep-alive ping every 10 seconds
-            if (Date.now() % 10000 < 2000) {
-              const pingEvent = `event: ping\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`
-              controller.enqueue(encoder.encode(pingEvent))
-            }
           } catch (error) {
-            console.error("Stream update error:", error)
-            // Don't close the stream on individual update errors
+            console.log("Stream update error (non-critical):", error?.message || error)
           }
-        }, 2000)
+        }, 5000) // Increased from 2s to 5s to reduce load
 
-        // Cleanup on close
-        const cleanup = () => {
-          clearInterval(interval)
+        cleanup = () => {
+          if (interval) {
+            clearInterval(interval)
+            interval = null
+          }
           try {
-            controller.close()
+            if (!controller.desiredSize === null) {
+              controller.close()
+            }
           } catch (e) {
             // Stream already closed
           }
@@ -64,11 +60,19 @@ export async function GET(req: NextRequest) {
 
         req.signal.addEventListener("abort", cleanup)
 
-        // Auto-cleanup after 5 minutes to prevent memory leaks
-        setTimeout(cleanup, 5 * 60 * 1000)
+        setTimeout(
+          () => {
+            if (cleanup) cleanup()
+          },
+          10 * 60 * 1000,
+        )
       } catch (error) {
-        console.error("Stream start error:", error)
-        controller.error(error)
+        console.log("Stream start error:", error?.message || error)
+        try {
+          controller.error(error)
+        } catch (e) {
+          // Controller already errored
+        }
       }
     },
   })
