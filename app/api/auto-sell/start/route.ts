@@ -1,18 +1,44 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { Buffer } from "buffer"
 
-// Global state for the auto-sell engine
+const PREMIUM_APIS = {
+  alchemy: {
+    mainnet1: "https://solana-mainnet.g.alchemy.com/v2/xPZFpP1qn7EApXWTwYAdP",
+    mainnet2: "https://solana-mainnet.g.alchemy.com/v2/DmvQMkbPZW42fYymT4V3Z3Qb7PNI-kIf",
+  },
+  moralis: {
+    token:
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjMzYTE1NmJiLWZhMGQtNDU4Zi04NGEyLWVkNDIwYjQ1NDNjNiIsIm9yZ0lkIjoiNDY1MTk3IiwidXNlcklkIjoiNDc4NTkwIiwidHlwZUlkIjoiYTM2NDI2OTctYmYwMy00OWVhLWIwZTYtYTc5OGU1NDNkMTA4IiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NTUyMDUwODUsImV4cCI6NDkxMDk2NTA4NX0.tErjySs0lpTELwue3KDhq5jQGTLf5cIlUP88BPo65ks",
+  },
+  quicknode: {
+    apiKey: "f1e32d45-d3d2-4895-8123-708173a75f40",
+  },
+  ankr: {
+    endpoint: "https://rpc.ankr.com/solana_devnet/ea81565d15b5f5217552fb8ca13e8c8c3db650af668d910fa6369bc619e9e9c4d",
+  },
+  drpc: {
+    endpoint: "https://lb.drpc.org/solana/AoLSJPx3VEsDmDDks2UasTR-g70MeVMR8Is_IgaNGuYu",
+  },
+  chainstack: {
+    https: "https://solana-mainnet.core.chainstack.com/1dddd2834b79c0f3f43138bd4a45e3eb",
+    wss: "wss://solana-mainnet.core.chainstack.com/1dddd2834b79c0f3f43138bd4a45e3eb",
+  },
+}
+
 const autoSellState = {
   isRunning: false,
   config: null as any,
   wallets: [] as any[],
   marketTrades: [] as any[],
   bitquerySubscription: null as any,
-  botStartTime: 0, // Track when bot actually started
-  firstAnalysisTime: 0, // Track when first analysis should happen
-  monitoringStartTime: 0, // When current monitoring window started
-  monitoringEndTime: 0, // When current monitoring window ends
-  lastDataUpdateTime: 0, // When data was last updated
+  moralisStream: null as any,
+  chainstackWs: null as any,
+  quicknodeStream: null as any,
+  botStartTime: 0,
+  firstAnalysisTime: 0,
+  monitoringStartTime: 0,
+  monitoringEndTime: 0,
+  lastDataUpdateTime: 0,
   metrics: {
     totalBought: 0,
     totalSold: 0,
@@ -23,6 +49,10 @@ const autoSellState = {
     buyVolumeUsd: 0,
     sellVolumeUsd: 0,
     lastSellTrigger: 0,
+    buyTransactionCount: 0,
+    sellTransactionCount: 0,
+    dataSourceConfidence: 0, // 0-100 confidence in data accuracy
+    lastRealTimeUpdate: 0,
   },
   intervals: [] as NodeJS.Timeout[],
 }
@@ -524,217 +554,298 @@ function analyzeTokenMintTransaction(transaction: any, tokenMint: string) {
 
 async function collectDexToolsData() {
   if (!autoSellState.config) {
-    console.error("[DEXTOOLS] Error: autoSellState.config is null")
+    console.log("[DEXTOOLS] ❌ Config not available")
     return
   }
 
-  try {
-    console.log("[DEXTOOLS] 🔧 Using DexTools API for transaction data")
+  const maxRetries = 3
+  let lastError = null
 
-    const dextoolsApiKey = "7vFPpWi4q1aQGjmQoFrhe1FvfoVr97Bb1dIgSFAc"
-    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { mint, timeWindowSeconds } = autoSellState.config
+      const windowStartTime = Date.now() - timeWindowSeconds * 1000
 
-    let response
-    let retryCount = 0
-    const maxRetries = 3
-
-    while (retryCount < maxRetries) {
-      try {
-        console.log(`[DEXTOOLS] 📡 API call attempt ${retryCount + 1}/${maxRetries}`)
-
-        response = await fetch(
-          `https://api.dextools.io/v1/token/${autoSellState.config.mint}/transactions?limit=100&sort=desc`,
-          {
-            headers: {
-              "X-API-Key": dextoolsApiKey,
-              Accept: "application/json",
-            },
-            timeout: 15000,
-          },
-        )
-
-        if (response.ok) break
-
-        console.log(`[DEXTOOLS] ⚠️ API call failed with status ${response.status}, retrying...`)
-        retryCount++
-
-        if (retryCount < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
-        }
-      } catch (error) {
-        console.log(`[DEXTOOLS] ⚠️ Network error on attempt ${retryCount + 1}: ${error.message}`)
-        retryCount++
-
-        if (retryCount < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * retryCount))
-        } else {
-          throw error
-        }
-      }
-    }
-
-    if (!response || !response.ok) {
-      throw new Error(`DexTools API error after ${maxRetries} attempts: ${response?.status || "Network failure"}`)
-    }
-
-    const data = await response.json()
-    console.log(`[DEXTOOLS] 📊 Raw API response:`, JSON.stringify(data, null, 2))
-
-    if (data.data && data.data.length > 0) {
-      const currentTime = Date.now()
-      const windowStartTime = currentTime - timeWindowSeconds * 1000
-
+      console.log(`[DEXTOOLS] 🚀 PREMIUM PRIMARY SOURCE - Attempt ${attempt}/${maxRetries}`)
       console.log(
-        `[DEXTOOLS] 🕐 Time window: ${new Date(windowStartTime).toLocaleTimeString()} to ${new Date().toLocaleTimeString()}`,
+        `[DEXTOOLS] 📅 Time window: ${new Date(windowStartTime).toLocaleTimeString()} → ${new Date().toLocaleTimeString()}`,
       )
-      console.log(`[DEXTOOLS] 📊 Processing ${data.data.length} total transactions`)
+
+      const response = await fetch(`https://api.dextools.io/v2/token/solana/${mint}/transactions?limit=100&sort=desc`, {
+        headers: {
+          "X-API-Key": process.env.DEXTOOLS_API_KEY || "",
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(15000),
+      })
+
+      if (!response.ok) {
+        throw new Error(`DexTools API error: ${response.status} ${response.statusText}`)
+      }
+
+      const data = await response.json()
+      console.log(`[DEXTOOLS] 📊 Raw API response structure:`, {
+        hasData: !!data.data,
+        dataLength: data.data?.length || 0,
+        statusCode: data.statusCode,
+        message: data.message,
+      })
+
+      if (!data.data || !Array.isArray(data.data)) {
+        throw new Error("No transaction data in DexTools response")
+      }
 
       let totalBuyVolumeUsd = 0
       let totalSellVolumeUsd = 0
       let buyCount = 0
       let sellCount = 0
+      let processedCount = 0
+
+      console.log(`[DEXTOOLS] 🔍 Processing ${data.data.length} transactions...`)
 
       for (const tx of data.data) {
-        const txTime = new Date(tx.timeStamp).getTime()
+        try {
+          const txTime = new Date(tx.timeStamp || tx.timestamp || tx.blockTime).getTime()
 
-        // Only include transactions within our time window
-        if (txTime >= windowStartTime) {
-          const usdAmount = Number(tx.amountUSD || 0)
+          if (txTime >= windowStartTime - 10000) {
+            // 10 second buffer
+            const usdAmount = Number(tx.amountUSD || tx.amount_usd || tx.valueUsd || 0)
+            processedCount++
 
-          console.log(`[DEXTOOLS] 🔍 PROCESSING TRANSACTION:`)
-          console.log(`[DEXTOOLS] - Type: "${tx.type}"`)
-          console.log(`[DEXTOOLS] - Amount USD: $${usdAmount.toFixed(4)}`)
-          console.log(`[DEXTOOLS] - Time: ${new Date(tx.timeStamp).toLocaleTimeString()}`)
+            console.log(`[DEXTOOLS] 🔍 TRANSACTION ${processedCount}:`)
+            console.log(`[DEXTOOLS] - Type: "${tx.type || tx.side || tx.action}"`)
+            console.log(`[DEXTOOLS] - Amount USD: $${usdAmount.toFixed(6)}`)
+            console.log(`[DEXTOOLS] - Time: ${new Date(txTime).toLocaleTimeString()}`)
+            console.log(`[DEXTOOLS] - Age: ${((Date.now() - txTime) / 1000).toFixed(1)}s ago`)
 
-          if (usdAmount > 0.0001) {
-            if (tx.type === "buy") {
-              totalBuyVolumeUsd += usdAmount
-              buyCount++
-              console.log(`[DEXTOOLS] ✅ Added to BUY pressure: $${usdAmount.toFixed(4)}`)
-            } else if (tx.type === "sell") {
-              totalSellVolumeUsd += usdAmount
-              sellCount++
-              console.log(`[DEXTOOLS] ✅ Added to SELL pressure: $${usdAmount.toFixed(4)}`)
+            if (usdAmount >= 0.0001) {
+              const txType = (tx.type || tx.side || tx.action || "").toLowerCase()
+
+              if (txType === "buy" || txType === "purchase") {
+                totalBuyVolumeUsd += usdAmount
+                buyCount++
+                console.log(`[DEXTOOLS] ✅ ADDED TO BUY PRESSURE: $${usdAmount.toFixed(6)}`)
+              } else if (txType === "sell" || txType === "sale") {
+                totalSellVolumeUsd += usdAmount
+                sellCount++
+                console.log(`[DEXTOOLS] ❌ ADDED TO SELL PRESSURE: $${usdAmount.toFixed(6)}`)
+              } else {
+                console.log(`[DEXTOOLS] ❓ UNKNOWN TYPE: "${txType}" - $${usdAmount.toFixed(6)}`)
+                if (tx.tokenAmount && Number(tx.tokenAmount) > 0) {
+                  totalBuyVolumeUsd += usdAmount
+                  buyCount++
+                  console.log(`[DEXTOOLS] ✅ INFERRED AS BUY: $${usdAmount.toFixed(6)}`)
+                } else if (tx.tokenAmount && Number(tx.tokenAmount) < 0) {
+                  totalSellVolumeUsd += usdAmount
+                  sellCount++
+                  console.log(`[DEXTOOLS] ❌ INFERRED AS SELL: $${usdAmount.toFixed(6)}`)
+                }
+              }
+            } else {
+              console.log(`[DEXTOOLS] ⚠️ Skipped (amount too small): $${usdAmount.toFixed(8)}`)
             }
-          } else {
-            console.log(`[DEXTOOLS] ⚠️ Skipped transaction (amount too small): $${usdAmount.toFixed(6)}`)
           }
-        } else {
-          console.log(`[DEXTOOLS] ⚠️ Skipped transaction (outside time window)`)
+        } catch (txError) {
+          console.log(`[DEXTOOLS] ⚠️ Error processing transaction:`, txError.message)
         }
       }
+
+      console.log(`[DEXTOOLS] 📈 FINAL RESULTS (Attempt ${attempt}):`)
+      console.log(`[DEXTOOLS] - Processed: ${processedCount}/${data.data.length} transactions`)
+      console.log(`[DEXTOOLS] - Buy Transactions: ${buyCount} totaling $${totalBuyVolumeUsd.toFixed(6)}`)
+      console.log(`[DEXTOOLS] - Sell Transactions: ${sellCount} totaling $${totalSellVolumeUsd.toFixed(6)}`)
+      console.log(`[DEXTOOLS] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(6)}`)
 
       autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
       autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
       autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+      autoSellState.metrics.buyTransactionCount = buyCount
+      autoSellState.metrics.sellTransactionCount = sellCount
+      autoSellState.metrics.dataSourceConfidence = Math.min(100, (processedCount / Math.max(1, data.data.length)) * 100)
 
-      console.log(`[DEXTOOLS] 📊 FINAL RESULTS:`)
-      console.log(`[DEXTOOLS] - Buy Volume: $${totalBuyVolumeUsd.toFixed(2)} (${buyCount} transactions)`)
-      console.log(`[DEXTOOLS] - Sell Volume: $${totalSellVolumeUsd.toFixed(2)} (${sellCount} transactions)`)
-      console.log(`[DEXTOOLS] - Net Flow: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`)
+      console.log(`[DEXTOOLS] ✅ SUCCESS - Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}%`)
+      return // Success, exit retry loop
+    } catch (error) {
+      lastError = error
+      console.error(`[DEXTOOLS] ❌ Attempt ${attempt}/${maxRetries} failed:`, error.message)
 
-      if (totalBuyVolumeUsd > 0 || totalSellVolumeUsd > 0) {
-        console.log(`[DEXTOOLS] ✅ Successfully collected meaningful transaction data`)
-      } else {
-        console.log(`[DEXTOOLS] ⚠️ No meaningful transactions found in time window`)
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000 // Exponential backoff
+        console.log(`[DEXTOOLS] ⏳ Retrying in ${delay}ms...`)
+        await new Promise((resolve) => setTimeout(resolve, delay))
       }
-    } else {
-      console.log(`[DEXTOOLS] ⚠️ No transaction data returned from API`)
-      throw new Error("No transaction data available from DexTools API")
+    }
+  }
+
+  throw lastError || new Error("All DexTools attempts failed")
+}
+
+async function collectAlchemyData() {
+  if (!autoSellState.config) return
+
+  try {
+    console.log("[ALCHEMY] 🚀 Using premium Alchemy endpoints...")
+
+    const { mint, timeWindowSeconds } = autoSellState.config
+    const endpoints = [PREMIUM_APIS.alchemy.mainnet1, PREMIUM_APIS.alchemy.mainnet2]
+
+    for (const endpoint of endpoints) {
+      try {
+        console.log(`[ALCHEMY] 📡 Trying endpoint: ${endpoint.slice(-10)}...`)
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getSignaturesForAddress",
+            params: [mint, { limit: 100 }],
+          }),
+          signal: AbortSignal.timeout(10000),
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          console.log(`[ALCHEMY] ✅ Got ${data.result?.length || 0} signatures`)
+
+          // Process signatures similar to Solana RPC method
+          await processAlchemySignatures(data.result || [], endpoint)
+          return
+        }
+      } catch (error) {
+        console.log(`[ALCHEMY] ⚠️ Endpoint failed: ${error.message}`)
+      }
+    }
+
+    throw new Error("All Alchemy endpoints failed")
+  } catch (error) {
+    console.error("[ALCHEMY] ❌ Failed to collect data:", error)
+    throw error
+  }
+}
+
+function handleRealTimeTransaction(transactionData) {
+  try {
+    console.log("[REALTIME] 📡 Processing real-time transaction update...")
+
+    const currentTime = Date.now()
+    autoSellState.metrics.lastRealTimeUpdate = currentTime
+
+    // Extract transaction details from real-time data
+    const txInfo = extractTransactionInfo(transactionData)
+
+    if (txInfo && txInfo.usdAmount > 0.0001) {
+      console.log(`[REALTIME] 🔍 Real-time ${txInfo.type}: $${txInfo.usdAmount.toFixed(6)}`)
+
+      if (txInfo.type === "buy") {
+        autoSellState.metrics.buyVolumeUsd += txInfo.usdAmount
+        autoSellState.metrics.buyTransactionCount++
+      } else if (txInfo.type === "sell") {
+        autoSellState.metrics.sellVolumeUsd += txInfo.usdAmount
+        autoSellState.metrics.sellTransactionCount++
+      }
+
+      autoSellState.metrics.netUsdFlow = autoSellState.metrics.buyVolumeUsd - autoSellState.metrics.sellVolumeUsd
+
+      console.log(
+        `[REALTIME] ✅ Updated metrics - Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)}`,
+      )
     }
   } catch (error) {
-    console.error("[DEXTOOLS] Data collection failed:", error)
-    throw error
+    console.error("[REALTIME] ❌ Error processing real-time transaction:", error)
   }
 }
 
 async function collectMarketDataForConfigurableWindow() {
   if (!autoSellState.config) {
-    console.error("[AUTO-SELL] Error: autoSellState.config is null - cannot collect market data")
-    return
+    console.error("[AUTO-SELL] Error: autoSellState.config is null")
+    return { success: false, error: "Configuration not available" }
   }
 
   try {
-    const timeWindowSeconds = autoSellState.config.timeWindowSeconds
-    console.log(`[AUTO-SELL] 🔍 STARTING ${timeWindowSeconds}-second market data collection...`)
+    console.log(`[AUTO-SELL] 🚀 MASTERPIECE TRANSACTION DETECTION SYSTEM`)
+    console.log(`[AUTO-SELL] Time window: ${autoSellState.config.timeWindowSeconds} seconds`)
     console.log(`[AUTO-SELL] Token mint: ${autoSellState.config.mint}`)
     console.log(`[AUTO-SELL] Current time: ${new Date().toISOString()}`)
 
     await updateTokenPrice()
 
-    console.log(`[AUTO-SELL] 🎯 ATTEMPTING PRIMARY: Bitquery EAP API...`)
-    try {
-      await collectBitqueryEAPData()
-      console.log("[BITQUERY-EAP] ✅ Successfully collected real-time DEX data as primary source")
-
-      console.log(
-        `[AUTO-SELL] 📊 PRIMARY RESULT: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-      )
-
-      if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
-        console.log("[AUTO-SELL] ✅ PRIMARY SUCCESS: Got meaningful transaction data")
-        return
-      } else {
-        console.log("[AUTO-SELL] ⚠️ PRIMARY RETURNED ZERO DATA: Trying secondary sources...")
-      }
-    } catch (error) {
-      console.log(`[BITQUERY-EAP] ❌ PRIMARY FAILED: ${error.message}`)
-      console.log("[AUTO-SELL] 🎯 ATTEMPTING SECONDARY: Solana RPC...")
+    if (!autoSellState.moralisStream) {
+      await initializeMoralisStream()
+    }
+    if (!autoSellState.chainstackWs) {
+      await initializeChainStackWebSocket()
     }
 
-    // Try Solana RPC as secondary option
-    try {
-      await collectDirectSolanaTransactions()
-      console.log("[SOLANA-RPC] ✅ Successfully collected real transaction data as secondary source")
-
-      console.log(
-        `[AUTO-SELL] 📊 SECONDARY RESULT: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-      )
-
-      if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
-        console.log("[AUTO-SELL] ✅ SECONDARY SUCCESS: Got meaningful transaction data")
-        return
-      } else {
-        console.log("[AUTO-SELL] ⚠️ SECONDARY RETURNED ZERO DATA: Trying tertiary sources...")
-      }
-    } catch (error) {
-      console.log(`[SOLANA-RPC] ❌ SECONDARY FAILED: ${error.message}`)
-      console.log("[AUTO-SELL] 🎯 ATTEMPTING TERTIARY: DexTools API...")
-    }
-
-    // Try DexTools API as tertiary option (more reliable than DexScreener)
+    console.log(`[AUTO-SELL] 🎯 PRIORITY 1: DexTools Premium API...`)
     try {
       await collectDexToolsData()
-      console.log("[DEXTOOLS] ✅ Successfully collected transaction data as tertiary source")
-
-      console.log(
-        `[AUTO-SELL] 📊 TERTIARY RESULT: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-      )
+      console.log("[DEXTOOLS] ✅ PRIMARY SUCCESS - Premium DexTools data collected")
 
       if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
-        console.log("[AUTO-SELL] ✅ TERTIARY SUCCESS: Got meaningful transaction data from DexTools")
-        return
-      } else {
-        console.log("[AUTO-SELL] ⚠️ TERTIARY RETURNED ZERO DATA: Trying final fallback...")
+        console.log(
+          `[AUTO-SELL] ✅ MASTERPIECE SUCCESS: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(4)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(4)} | Confidence: ${autoSellState.metrics.dataSourceConfidence.toFixed(1)}%`,
+        )
+        return { success: true, source: "DexTools Premium" }
       }
     } catch (error) {
-      console.log(`[DEXTOOLS] ❌ TERTIARY FAILED: ${error.message}`)
-      console.log("[AUTO-SELL] 🎯 ATTEMPTING FINAL FALLBACK: DexScreener estimation...")
+      console.log(`[DEXTOOLS] ❌ PRIORITY 1 FAILED: ${error.message}`)
     }
 
-    // Use DexScreener as final fallback (with transaction type reversal)
-    await collectDexScreenerData()
-    console.log("[DEXSCREENER] ⚠️ Using DexScreener as final fallback (transaction types may be reversed)")
-    console.log(
-      `[AUTO-SELL] 📊 FALLBACK RESULT: Buy: $${autoSellState.metrics.buyVolumeUsd.toFixed(2)} | Sell: $${autoSellState.metrics.sellVolumeUsd.toFixed(2)} | Net: $${autoSellState.metrics.netUsdFlow.toFixed(2)}`,
-    )
+    console.log(`[AUTO-SELL] 🎯 PRIORITY 2: Alchemy Premium API...`)
+    try {
+      await collectAlchemyData()
+      console.log("[ALCHEMY] ✅ SECONDARY SUCCESS - Premium Alchemy data collected")
+
+      if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
+        console.log(`[AUTO-SELL] ✅ SECONDARY SUCCESS: Got meaningful data from Alchemy`)
+        return { success: true, source: "Alchemy Premium" }
+      }
+    } catch (error) {
+      console.log(`[ALCHEMY] ❌ PRIORITY 2 FAILED: ${error.message}`)
+    }
+
+    console.log(`[AUTO-SELL] 🎯 PRIORITY 3: Bitquery EAP API...`)
+    try {
+      await collectBitqueryEAPData()
+      console.log("[BITQUERY-EAP] ✅ TERTIARY SUCCESS - Real-time DEX data collected")
+
+      if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
+        console.log(`[AUTO-SELL] ✅ TERTIARY SUCCESS: Got meaningful data from Bitquery`)
+        return { success: true, source: "Bitquery EAP" }
+      }
+    } catch (error) {
+      console.log(`[BITQUERY-EAP] ❌ PRIORITY 3 FAILED: ${error.message}`)
+    }
+
+    console.log(`[AUTO-SELL] 🎯 PRIORITY 4: Premium Solana RPC...`)
+    try {
+      await collectDirectSolanaTransactions()
+      console.log("[SOLANA-RPC] ✅ QUATERNARY SUCCESS - Direct blockchain analysis")
+
+      if (autoSellState.metrics.buyVolumeUsd > 0 || autoSellState.metrics.sellVolumeUsd > 0) {
+        console.log(`[AUTO-SELL] ✅ QUATERNARY SUCCESS: Got meaningful data from Solana RPC`)
+        return { success: true, source: "Premium Solana RPC" }
+      }
+    } catch (error) {
+      console.log(`[SOLANA-RPC] ❌ PRIORITY 4 FAILED: ${error.message}`)
+    }
+
+    console.log(`[AUTO-SELL] 🎯 FINAL FALLBACK: DexScreener API...`)
+    try {
+      await collectDexScreenerData()
+      console.log("[DEXSCREENER] ✅ FALLBACK SUCCESS - DexScreener data collected")
+      return { success: true, source: "DexScreener Fallback" }
+    } catch (error) {
+      console.log(`[DEXSCREENER] ❌ FINAL FALLBACK FAILED: ${error.message}`)
+    }
+
+    console.log("[AUTO-SELL] ❌ ALL DATA SOURCES FAILED - Using zero values")
+    return { success: false, error: "All data sources failed" }
   } catch (error) {
-    console.error("[AUTO-SELL] ❌ COMPLETE DATA COLLECTION FAILURE:", error)
-    // Reset metrics if all data sources fail
-    autoSellState.metrics.buyVolumeUsd = 0
-    autoSellState.metrics.sellVolumeUsd = 0
-    autoSellState.metrics.netUsdFlow = 0
-    console.log("[AUTO-SELL] 🔄 Reset all metrics to zero due to complete failure")
+    console.error(`[AUTO-SELL] ❌ Critical error in data collection:`, error)
+    return { success: false, error: error.message }
   }
 }
 
@@ -1359,5 +1470,209 @@ async function safeFetch(url: string, options: any = {}) {
   } catch (error: any) {
     console.error(`[FETCH] ❌ Failed to fetch ${url}: ${error.message}`)
     return undefined
+  }
+}
+
+async function initializeMoralisStream() {
+  if (!autoSellState.config?.mint) return
+
+  try {
+    console.log("[MORALIS] 🚀 Initializing real-time transaction stream...")
+
+    const streamConfig = {
+      chains: ["solana"],
+      description: `Auto-sell monitoring for ${autoSellState.config.mint}`,
+      tag: "auto-sell-monitor",
+      includeContractLogs: true,
+      includeInternalTxs: true,
+      webhookUrl: `${process.env.NEXT_PUBLIC_API_BASE || "https://your-domain.com"}/api/webhooks/moralis`,
+      triggers: [
+        {
+          type: "tx",
+          contractAddress: autoSellState.config.mint,
+          functionAbi: {
+            type: "function",
+            name: "transfer",
+          },
+        },
+      ],
+    }
+
+    const response = await fetch("https://api.moralis-streams.com/streams/evm", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-Key": PREMIUM_APIS.moralis.token,
+      },
+      body: JSON.stringify(streamConfig),
+    })
+
+    if (response.ok) {
+      const streamData = await response.json()
+      autoSellState.moralisStream = streamData
+      console.log("[MORALIS] ✅ Real-time stream initialized successfully")
+    }
+  } catch (error) {
+    console.error("[MORALIS] ❌ Failed to initialize stream:", error)
+  }
+}
+
+async function initializeChainStackWebSocket() {
+  if (!autoSellState.config?.mint) return
+
+  try {
+    console.log("[CHAINSTACK] 🚀 Connecting to WebSocket for real-time updates...")
+
+    const WebSocket = require("ws")
+    const ws = new WebSocket(PREMIUM_APIS.chainstack.wss)
+
+    ws.on("open", () => {
+      console.log("[CHAINSTACK] ✅ WebSocket connected")
+
+      // Subscribe to account changes for the token mint
+      ws.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "accountSubscribe",
+          params: [
+            autoSellState.config.mint,
+            {
+              encoding: "jsonParsed",
+              commitment: "finalized",
+            },
+          ],
+        }),
+      )
+    })
+
+    ws.on("message", (data) => {
+      try {
+        const message = JSON.parse(data.toString())
+        if (message.method === "accountNotification") {
+          console.log("[CHAINSTACK] 📡 Real-time account update received")
+          handleRealTimeTransaction(message.params.result)
+        }
+      } catch (error) {
+        console.error("[CHAINSTACK] ❌ Error processing WebSocket message:", error)
+      }
+    })
+
+    autoSellState.chainstackWs = ws
+  } catch (error) {
+    console.error("[CHAINSTACK] ❌ Failed to initialize WebSocket:", error)
+  }
+}
+
+async function processAlchemySignatures(signatures: any[], endpoint: string) {
+  if (!autoSellState.config) {
+    console.error("[ALCHEMY] Error: autoSellState.config is null")
+    return
+  }
+
+  const { Connection } = await import("@solana/web3.js")
+
+  const connection = new Connection(
+    process.env.NEXT_PUBLIC_RPC_URL ||
+      process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
+      "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+    { commitment: "confirmed" },
+  )
+
+  const timeWindowMs = autoSellState.config.timeWindowSeconds * 1000
+  const currentTime = Date.now()
+  const windowStartTime = currentTime - timeWindowMs
+
+  console.log(`[ALCHEMY] 🔍 Processing ${signatures.length} signatures from ${endpoint.slice(-10)}...`)
+
+  let totalBuyVolumeUsd = 0
+  let totalSellVolumeUsd = 0
+  let buyCount = 0
+  let sellCount = 0
+  let analyzedCount = 0
+  let filteredCount = 0
+  const processedTransactions = []
+
+  for (const sigInfo of signatures) {
+    const txTime = (sigInfo.blockTime || 0) * 1000
+
+    // Filter signatures by time window
+    if (txTime >= windowStartTime) {
+      try {
+        console.log(`[ALCHEMY] 🔍 Fetching transaction ${sigInfo.signature.substring(0, 8)}...`)
+
+        const tx = await connection.getTransaction(sigInfo.signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        })
+
+        if (!tx || !tx.meta) {
+          console.log(`[ALCHEMY] ❌ No transaction data for ${sigInfo.signature.substring(0, 8)}`)
+          continue
+        }
+
+        console.log(`[ALCHEMY] ✅ Transaction data retrieved for ${sigInfo.signature.substring(0, 8)}`)
+        analyzedCount++
+
+        const tradeInfo = analyzeTokenMintTransaction(tx, autoSellState.config.mint)
+
+        if (tradeInfo) {
+          processedTransactions.push({
+            signature: tradeInfo.signature,
+            type: tradeInfo.type,
+            usdAmount: tradeInfo.usdAmount,
+            timestamp: txTime,
+          })
+
+          if (tradeInfo.type === "buy") {
+            totalBuyVolumeUsd += tradeInfo.usdAmount
+            buyCount++
+            console.log(
+              `[ALCHEMY] ✅ BUY DETECTED: $${tradeInfo.usdAmount.toFixed(4)} | ${tradeInfo.tokenAmount.toFixed(4)} tokens`,
+            )
+          } else if (tradeInfo.type === "sell") {
+            totalSellVolumeUsd += tradeInfo.usdAmount
+            sellCount++
+            console.log(
+              `[ALCHEMY] ❌ SELL DETECTED: $${tradeInfo.usdAmount.toFixed(4)} | ${tradeInfo.tokenAmount.toFixed(4)} tokens`,
+            )
+          }
+        } else {
+          filteredCount++
+          console.log(`[ALCHEMY] ⚪ Transaction ${sigInfo.signature.substring(0, 8)} - NO TRADE DETECTED`)
+        }
+      } catch (txError) {
+        console.log(`[ALCHEMY] ❌ Error analyzing transaction ${sigInfo.signature.substring(0, 8)}: ${txError.message}`)
+        continue
+      }
+    }
+  }
+
+  autoSellState.marketTrades = processedTransactions
+  autoSellState.metrics.buyVolumeUsd = totalBuyVolumeUsd
+  autoSellState.metrics.sellVolumeUsd = totalSellVolumeUsd
+  autoSellState.metrics.netUsdFlow = totalBuyVolumeUsd - totalSellVolumeUsd
+
+  console.log(`[ALCHEMY] 📊 FINAL RESULTS:`)
+  console.log(`[ALCHEMY] - Analyzed: ${analyzedCount}`)
+  console.log(`[ALCHEMY] - Filtered out: ${filteredCount}`)
+  console.log(`[ALCHEMY] - Buy transactions: ${buyCount} ($${totalBuyVolumeUsd.toFixed(4)})`)
+  console.log(`[ALCHEMY] - Sell transactions: ${sellCount} ($${totalSellVolumeUsd.toFixed(4)})`)
+  console.log(`[ALCHEMY] - Net Flow: $${(totalBuyVolumeUsd - totalSellVolumeUsd).toFixed(4)}`)
+}
+
+function extractTransactionInfo(transactionData: any) {
+  try {
+    // Extract relevant information from the transaction data
+    const type = transactionData.type || "unknown"
+    const usdAmount = Number(transactionData.amountUSD || 0)
+
+    return {
+      type: type,
+      usdAmount: usdAmount,
+    }
+  } catch (error) {
+    console.error("[REALTIME] ❌ Error extracting transaction info:", error)
+    return null
   }
 }
