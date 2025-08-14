@@ -172,6 +172,11 @@ function startConfigurableAnalysisCycle() {
 }
 
 async function collectDirectSolanaTransactions() {
+  if (!autoSellState.config) {
+    console.error("[SOLANA-RPC] Error: autoSellState.config is null")
+    return
+  }
+
   const { Connection, PublicKey } = await import("@solana/web3.js")
 
   const connection = new Connection(
@@ -506,6 +511,11 @@ function analyzeTokenMintTransaction(tx: any, tokenMint: string) {
 }
 
 async function collectDexToolsData() {
+  if (!autoSellState.config) {
+    console.error("[DEXTOOLS] Error: autoSellState.config is null")
+    return
+  }
+
   try {
     console.log("[DEXTOOLS] Using DexTools API for transaction data")
 
@@ -572,6 +582,11 @@ async function collectDexToolsData() {
 }
 
 async function collectMarketDataForConfigurableWindow() {
+  if (!autoSellState.config) {
+    console.error("[AUTO-SELL] Error: autoSellState.config is null - cannot collect market data")
+    return
+  }
+
   try {
     const timeWindowSeconds = autoSellState.config.timeWindowSeconds
     console.log(`[AUTO-SELL] Collecting ${timeWindowSeconds}-second market data...`)
@@ -1019,6 +1034,11 @@ async function updateSolPrice() {
 }
 
 async function collectDexScreenerData() {
+  if (!autoSellState.config) {
+    console.error("[DEXSCREENER] Error: autoSellState.config is null")
+    return
+  }
+
   try {
     console.log("[DEXSCREENER] Using DexScreener with conservative estimation")
 
