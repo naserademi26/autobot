@@ -175,11 +175,18 @@ interface AutoSellStatus {
   }>
 }
 
+const PREMIUM_ENDPOINTS = [
+  "https://solana-mainnet.g.alchemy.com/v2/DmvQMkbPZW42fYymT4V3Z3Qb7PNI-kIf",
+  "https://lb.drpc.org/solana/AoLSJPx3VEsDmDDks2UasTR-g70MeVMR8Is_IgaNGuYuChainstack",
+  "https://solana-mainnet.core.chainstack.com/1dddd2834b79c0f3f43138bd4a45e3eb",
+  "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e",
+]
+
 const ENDPOINT =
   process.env.NEXT_PUBLIC_RPC_URL ||
   process.env.NEXT_PUBLIC_HELIUS_RPC_URL ||
   process.env.NEXT_PUBLIC_SOLANA_RPC ||
-  "https://mainnet.helius-rpc.com/?api-key=13b641b3-c9e5-4c63-98ae-5def3800fa0e"
+  PREMIUM_ENDPOINTS[0] // Use Alchemy as primary
 
 function sanitizeMintInput(input: string): string {
   const s = input.trim()
@@ -198,7 +205,16 @@ function sanitizeMintInput(input: string): string {
 }
 
 function MarketMomentumDashboard() {
-  const connection = useMemo(() => new Connection(ENDPOINT, { commitment: "confirmed" }), [])
+  const connection = useMemo(
+    () =>
+      new Connection(ENDPOINT, {
+        commitment: "confirmed",
+        confirmTransactionInitialTimeout: 60000,
+        disableRetryOnRateLimit: false,
+      }),
+    [],
+  )
+
   const [rpcOk, setRpcOk] = useState<boolean | null>(null)
 
   // Wallet management
@@ -252,14 +268,45 @@ function MarketMomentumDashboard() {
 
   useEffect(() => {
     let mounted = true
-    ;(async () => {
+    const currentEndpointIndex = 0
+
+    const testConnection = async (endpoint: string): Promise<boolean> => {
       try {
-        await connection.getLatestBlockhash("confirmed")
-        if (mounted) setRpcOk(true)
-      } catch {
-        if (mounted) setRpcOk(false)
+        const testConnection = new Connection(endpoint, { commitment: "confirmed" })
+        await testConnection.getLatestBlockhash("confirmed")
+        return true
+      } catch (error) {
+        console.log(`[v0] RPC endpoint ${endpoint} failed:`, error)
+        return false
       }
-    })()
+    }
+
+    const findWorkingEndpoint = async () => {
+      // First try the current endpoint
+      const currentWorking = await testConnection(ENDPOINT)
+      if (currentWorking && mounted) {
+        setRpcOk(true)
+        return
+      }
+
+      // Try premium endpoints in order
+      for (let i = 0; i < PREMIUM_ENDPOINTS.length; i++) {
+        if (!mounted) break
+
+        const working = await testConnection(PREMIUM_ENDPOINTS[i])
+        if (working) {
+          console.log(`[v0] Switched to working RPC endpoint: ${PREMIUM_ENDPOINTS[i]}`)
+          if (mounted) setRpcOk(true)
+          return
+        }
+      }
+
+      // All endpoints failed
+      if (mounted) setRpcOk(false)
+    }
+
+    findWorkingEndpoint()
+
     return () => {
       mounted = false
     }
